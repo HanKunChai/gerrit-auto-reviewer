@@ -137,7 +137,7 @@ class AutoReviewPoller:
 
         try:
             self._review_change(cid, cnum, str(rnum), proj, rid, subj)
-            logger.info("[%s] 评审完成", cid)
+            logger.info("[%s] 处理完成", cid)
         except Exception as e:
             logger.error("[%s] 评审失败: %s", cid, e, exc_info=True)
         finally:
@@ -270,15 +270,17 @@ class AutoReviewPoller:
         claude_review = self._invoke_claude(diff_text, change_id, commit_msg, repo_dir, base_branch)
         if claude_review:
             logger.info("  Claude 评审: %d 字符", len(claude_review))
-        elif not self.config.auto_review.use_rules_engine:
-            logger.error("  Claude Code 不可用且规则引擎未启用，无法评审")
+        else:
+            # Claude 失败 → 不向 Gerrit 上报任何信息，只记录日志
+            logger.error("  Claude Code 评审失败，跳过上报 (变更: %s)", change_id)
+            return
 
         # 4. 构造评审消息
         logger.info("  [4/4] 构造评审意见...")
         message = self._build_review_message(change_id, subject, issues, claude_review)
         logger.info("  评审意见: %d 字符", len(message))
 
-        # 5. 提交评审（只输出意见，不打分）
+        # 5. 提交评审
         if not self.mock:
             result = self._client.post_review(
                 change_id, rev_id,
