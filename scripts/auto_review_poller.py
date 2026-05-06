@@ -358,13 +358,25 @@ class AutoReviewPoller:
         started = time.time()
         stderr_lines = []
 
+        # 专用 logger：Claude stderr 只写文件，不打印到控制台
+        claude_logger = logging.getLogger("auto-review-poller.claude")
+        claude_logger.propagate = False
+        if not claude_logger.handlers:
+            log_dir = os.path.join(PROJECT_DIR, "logs")
+            fh = logging.FileHandler(
+                os.path.join(log_dir, "claude_debug.log"), encoding="utf-8",
+            )
+            fh.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+            claude_logger.addHandler(fh)
+            claude_logger.setLevel(logging.DEBUG)
+
         def _read_stderr(pipe):
-            """实时读取 stderr 并记录日志。"""
+            """实时读取 Claude stderr，写入文件日志。"""
             for line in iter(pipe.readline, ""):
                 line = line.strip()
                 if line:
                     stderr_lines.append(line)
-                    logger.debug("  [claude] %s", line[:200])
+                    claude_logger.debug("%s", line[:300])
 
         try:
             proc = subprocess.Popen(
