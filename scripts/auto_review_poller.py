@@ -348,7 +348,6 @@ class AutoReviewPoller:
             claude_bin, "-p", prompt,
             "--dangerously-skip-permissions",
             "--max-turns", "10",
-            "--verbose",
         ]
         if repo_dir and os.path.isdir(repo_dir):
             cwd = repo_dir
@@ -370,6 +369,9 @@ class AutoReviewPoller:
             claude_logger.addHandler(fh)
             claude_logger.setLevel(logging.DEBUG)
 
+        claude_logger.debug("[start] change=%s prompt=%d chars timeout=%ds",
+                            change_id, len(prompt), timeout)
+
         def _read_stderr(pipe):
             """实时读取 Claude stderr，写入文件日志。"""
             for line in iter(pipe.readline, ""):
@@ -377,6 +379,7 @@ class AutoReviewPoller:
                 if line:
                     stderr_lines.append(line)
                     claude_logger.debug("%s", line[:300])
+            claude_logger.debug("[stderr eof]")
 
         try:
             proc = subprocess.Popen(
@@ -410,17 +413,19 @@ class AutoReviewPoller:
 
             if proc.returncode != 0:
                 logger.error("  Claude 返回 %d (%.0fs)", proc.returncode, elapsed)
-                logger.error("  stderr:\n%s",
+                logger.error("  stderr: %d 行, 最后:\n%s",
+                             len(stderr_lines),
                              "\n".join(stderr_lines[-20:]) if stderr_lines else "(无输出)")
                 return None
 
             output = (stdout or "").strip()
             if not output:
-                logger.warning("  Claude 返回空输出 (%.0fs)", elapsed)
-                logger.warning("  stderr:\n%s",
-                               "\n".join(stderr_lines[-10:]) if stderr_lines else "(无输出)")
+                logger.warning("  Claude 返回空输出 (%.0fs, stderr=%d行)",
+                               elapsed, len(stderr_lines))
                 return None
 
+            claude_logger.debug("[done] rc=0 elapsed=%.0fs stdout=%d stderr=%d",
+                                elapsed, len(output), len(stderr_lines))
             logger.info("  Claude 完成 (%.0fs, %d 字符)", elapsed, len(output))
             return output
 
