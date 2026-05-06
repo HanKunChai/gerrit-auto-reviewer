@@ -21,6 +21,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -343,34 +344,74 @@ class AutoReviewPoller:
         env = os.environ.copy()
         env["CLAUDE_CODE_SKIP_AUTH"] = "1"
 
-        cmd = [claude_bin, "-p", prompt, "--dangerously-skip-permissions"]
+        cmd = [
+            claude_bin, "-p", prompt,
+            "--dangerously-skip-permissions",
+            "--max-turns", "10",
+            "--verbose",
+        ]
         if repo_dir and os.path.isdir(repo_dir):
             cwd = repo_dir
         else:
             cwd = None
 
+        started = time.time()
+        stderr_lines = []
+
+        def _read_stderr(pipe):
+            """实时读取 stderr 并记录日志。"""
+            for line in iter(pipe.readline, ""):
+                line = line.strip()
+                if line:
+                    stderr_lines.append(line)
+                    logger.debug("  [claude] %s", line[:200])
+
         try:
-            result = subprocess.run(
+            proc = subprocess.Popen(
                 cmd,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 encoding="utf-8",
                 errors="replace",
-                timeout=timeout,
                 cwd=cwd,
                 env=env,
             )
-            if result.returncode != 0:
-                logger.error("  Claude 返回 %d\nstderr: %s",
-                             result.returncode, result.stderr[:500])
+            # 启动后台线程实时读取 stderr
+            stderr_thread = threading.Thread(
+                target=_read_stderr, args=(proc.stderr,), daemon=True,
+            )
+            stderr_thread.start()
+
+            try:
+                stdout, _ = proc.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                stdout, _ = proc.communicate()
+                elapsed = time.time() - started
+                logger.error("  Claude 评审超时 (%ds), 已终止", timeout)
+                logger.error("  stderr (最后 10 行):\n%s",
+                             "\n".join(stderr_lines[-10:]) if stderr_lines else "(无输出)")
                 return None
-            output = result.stdout.strip()
+
+            elapsed = time.time() - started
+            stderr_thread.join(timeout=2)
+
+            if proc.returncode != 0:
+                logger.error("  Claude 返回 %d (%.0fs)", proc.returncode, elapsed)
+                logger.error("  stderr:\n%s",
+                             "\n".join(stderr_lines[-20:]) if stderr_lines else "(无输出)")
+                return None
+
+            output = (stdout or "").strip()
             if not output:
-                logger.warning("  Claude 返回空输出")
+                logger.warning("  Claude 返回空输出 (%.0fs)", elapsed)
+                logger.warning("  stderr:\n%s",
+                               "\n".join(stderr_lines[-10:]) if stderr_lines else "(无输出)")
                 return None
+
+            logger.info("  Claude 完成 (%.0fs, %d 字符)", elapsed, len(output))
             return output
-        except subprocess.TimeoutExpired:
-            logger.error("  Claude 评审超时 (%ds)", timeout)
-            return None
+
         except Exception as e:
             logger.error("  Claude 调用失败: %s", e)
             return None
