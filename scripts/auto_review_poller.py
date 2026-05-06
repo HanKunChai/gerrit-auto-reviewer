@@ -306,7 +306,8 @@ class AutoReviewPoller:
         # 3. Claude Code AI 评审 (在 repo 目录中运行，可读取完整文件)
         logger.info("  [3/4] Claude Code 评审...")
         repo_dir = str(repo.repo_path) if hasattr(repo, 'repo_path') else None
-        claude_review = self._invoke_claude(diff_text, change_id, commit_msg, repo_dir, base_branch)
+        changed_files = [f for _, f in files]
+        claude_review = self._invoke_claude(change_id, commit_msg, repo_dir, base_branch, changed_files)
         if claude_review:
             logger.info("  Claude 评审: %d 字符", len(claude_review))
         else:
@@ -334,13 +335,14 @@ class AutoReviewPoller:
         logger.info("  [OK] 评审完成")
 
     def _invoke_claude(
-        self, diff_text: str, change_id: str, commit_msg: str,
+        self, change_id: str, commit_msg: str,
         repo_dir: Optional[str] = None, base_branch: str = "master",
+        changed_files: Optional[List[str]] = None,
     ) -> Optional[str]:
         """Invoke Claude Code to review the diff in the local repo.
 
-        Claude runs with cwd=repo_dir so it can Read/Grep/Bash the full
-        codebase for context, not just the diff snippet.
+        Claude runs git diff itself (cwd=repo_dir). Only file names are passed
+        as hints; the full diff text is not loaded into the prompt.
         """
         claude_bin = shutil.which("claude") or shutil.which("claude-code")
         if not claude_bin:
@@ -362,24 +364,14 @@ class AutoReviewPoller:
         # 从 commit message 提取关键信息
         problem, solution = _parse_commit_msg(commit_msg)
 
-        # Build prompt
+        # Build prompt — 只传文件名+git命令，Claude 自己取 diff
+        files_str = ", ".join(changed_files[:20]) if changed_files else "?"
         prompt = (
             f"{prompt_template}\n\n"
             f"问题: {problem}\n方案: {solution}\n"
-            f"```diff\n{diff_text}\n```"
+            f"文件: {files_str}\n"
+            f"用 git diff {base_branch}...FETCH_HEAD 获取diff"
         )
-
-        # Truncate to limit context usage (faster processing)
-        max_chars = 30000
-        if len(prompt) > max_chars:
-            logger.warning("  提示过长 (%d > %d)，截断 diff", len(prompt), max_chars)
-            overhead = len(prompt) - len(diff_text)
-            diff_limit = max_chars - overhead - 50
-            prompt = (
-                f"{prompt_template}\n\n"
-                f"问题: {problem}\n方案: {solution}\n"
-                f"```diff\n{diff_text[:diff_limit]}\n```"
-            )
 
         timeout = self.config.auto_review.claude_timeout
         logger.info("  调用 Claude Code (cwd=%s, prompt=%d chars, timeout=%ds)...",
