@@ -297,11 +297,11 @@ class AutoReviewPoller:
             logger.warning("  未找到 claude/claude-code 命令，跳过 AI 评审")
             return None
 
-        # Load review prompt template
+        # Load review prompt template (fast version for quicker turnaround)
         prompt_template = ""
         prompt_path = os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "review_prompts", "c_review_prompt.md",
+            "review_prompts", "c_review_prompt_fast.md",
         )
         try:
             with open(prompt_path, encoding="utf-8") as f:
@@ -309,35 +309,18 @@ class AutoReviewPoller:
         except FileNotFoundError:
             logger.warning("  未找到评审模板，使用默认提示")
 
-        # Build the prompt
-        prompt = (
-            f"{prompt_template}\n\n"
-            f"## 任务\n"
-            f"你正在本地 git 仓库中运行，当前目录就是项目代码。\n"
-            f"请评审下面的 git diff，并：\n"
-            f"1. 先用 Read 工具查看 diff 涉及的关键文件全文，理解上下文\n"
-            f"2. 用 Grep 搜索相关调用者/被调用者\n"
-            f"3. 综合上下文给出全面评审意见\n\n"
-            f"## 变更信息\n"
-            f"- Change-Id: {change_id}\n"
-            f"- 标题: {subject}\n"
-            f"- 目标分支: {base_branch}\n\n"
-            f"## Diff\n```diff\n{diff_text}\n```\n\n"
-            f"请开始评审。"
-        )
+        # Build prompt (fast — template already has all instructions)
+        prompt = f"{prompt_template}\n\n变更: {change_id}\n目标分支: {base_branch}\n\n```diff\n{diff_text}\n```"
 
-        # Truncate if too long (protect Claude's context window)
-        max_chars = 40000
+        # Truncate to limit context usage (faster processing)
+        max_chars = 30000
         if len(prompt) > max_chars:
             logger.warning("  提示过长 (%d > %d)，截断 diff", len(prompt), max_chars)
             overhead = len(prompt) - len(diff_text)
             diff_limit = max_chars - overhead - 50
             prompt = (
-                f"{prompt_template}\n\n"
-                f"## 任务\n你正在本地 git 仓库中运行。\n"
-                f"## 变更信息\n- Change-Id: {change_id}\n- 标题: {subject}\n"
-                f"## Diff (截断)\n```diff\n{diff_text[:diff_limit]}\n```\n"
-                f"请开始评审。"
+                f"{prompt_template}\n\n{change_id}\n"
+                f"```diff\n{diff_text[:diff_limit]}\n```"
             )
 
         timeout = self.config.auto_review.claude_timeout
