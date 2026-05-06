@@ -211,14 +211,22 @@ class AutoReviewPoller:
         logger.info("  [1/3] 获取 diff...")
         repo = None
         base_branch = "master"
+        commit_msg = subject
         if self.mock:
             diff_text = self._mock_diff()
             files = self._mock_files()
         else:
             repo = self._ensure_local_repo(project)
+            commit_msg = subject
             try:
                 change_info = self._client.get_change(change_id)
                 base_branch = change_info.get("branch", base_branch)
+                # Get full commit message for business logic review
+                revisions = change_info.get("revisions", {})
+                if revisions:
+                    rev_data = list(revisions.values())[0]
+                    commit = rev_data.get("commit", {})
+                    commit_msg = commit.get("message", subject)
             except Exception:
                 pass
             # 先 fetch base branch（避免覆盖 FETCH_HEAD），再 fetch change
@@ -258,7 +266,7 @@ class AutoReviewPoller:
         # 3. Claude Code AI 评审 (在 repo 目录中运行，可读取完整文件)
         logger.info("  [3/4] Claude Code 评审...")
         repo_dir = str(repo.repo_path) if hasattr(repo, 'repo_path') else None
-        claude_review = self._invoke_claude(diff_text, change_id, subject, repo_dir, base_branch)
+        claude_review = self._invoke_claude(diff_text, change_id, commit_msg, repo_dir, base_branch)
         if claude_review:
             logger.info("  Claude 评审: %d 字符", len(claude_review))
         elif not self.config.auto_review.use_rules_engine:
@@ -284,7 +292,7 @@ class AutoReviewPoller:
         logger.info("  [OK] 评审完成")
 
     def _invoke_claude(
-        self, diff_text: str, change_id: str, subject: str,
+        self, diff_text: str, change_id: str, commit_msg: str,
         repo_dir: Optional[str] = None, base_branch: str = "master",
     ) -> Optional[str]:
         """Invoke Claude Code to review the diff in the local repo.
@@ -310,7 +318,12 @@ class AutoReviewPoller:
             logger.warning("  未找到评审模板，使用默认提示")
 
         # Build prompt (fast — template already has all instructions)
-        prompt = f"{prompt_template}\n\n变更: {change_id}\n目标分支: {base_branch}\n\n```diff\n{diff_text}\n```"
+        prompt = (
+            f"{prompt_template}\n\n"
+            f"变更: {change_id}\n目标分支: {base_branch}\n"
+            f"Commit Message:\n{commit_msg}\n\n"
+            f"```diff\n{diff_text}\n```"
+        )
 
         # Truncate to limit context usage (faster processing)
         max_chars = 30000
@@ -319,7 +332,7 @@ class AutoReviewPoller:
             overhead = len(prompt) - len(diff_text)
             diff_limit = max_chars - overhead - 50
             prompt = (
-                f"{prompt_template}\n\n{change_id}\n"
+                f"{prompt_template}\n\n{change_id}\n{commit_msg}\n"
                 f"```diff\n{diff_text[:diff_limit]}\n```"
             )
 
