@@ -10,7 +10,7 @@ gerrit:
 
 auto_review:
   enabled: true
-  poll_interval: 120
+  poll_interval: 600
   reviewer: "code-reviewer"
   query: "reviewer:code-reviewer+status:open"
   max_changes_per_poll: 10
