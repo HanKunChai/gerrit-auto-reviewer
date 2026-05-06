@@ -307,7 +307,9 @@ class AutoReviewPoller:
         logger.info("  [3/4] Claude Code 评审...")
         repo_dir = str(repo.repo_path) if hasattr(repo, 'repo_path') else None
         changed_files = [f for _, f in files]
-        claude_review = self._invoke_claude(change_id, commit_msg, repo_dir, base_branch, changed_files)
+        claude_review = self._invoke_claude(
+            change_id, commit_msg, repo_dir, base_branch, changed_files, sha,
+        )
         if claude_review:
             logger.info("  Claude 评审: %d 字符", len(claude_review))
         else:
@@ -338,11 +340,12 @@ class AutoReviewPoller:
         self, change_id: str, commit_msg: str,
         repo_dir: Optional[str] = None, base_branch: str = "master",
         changed_files: Optional[List[str]] = None,
+        head_sha: str = "",
     ) -> Optional[str]:
         """Invoke Claude Code to review the diff in the local repo.
 
-        Claude runs git diff itself (cwd=repo_dir). Only file names are passed
-        as hints; the full diff text is not loaded into the prompt.
+        Passes commit SHA instead of depending on FETCH_HEAD (which can be
+        overwritten by other git commands).
         """
         claude_bin = shutil.which("claude") or shutil.which("claude-code")
         if not claude_bin:
@@ -364,13 +367,13 @@ class AutoReviewPoller:
         # 从 commit message 提取关键信息
         problem, solution = _parse_commit_msg(commit_msg)
 
-        # Build prompt — 只传文件名+git命令，Claude 自己取 diff
+        # Build prompt — 传文件名+SHA，Claude 自己取 diff
         files_str = ", ".join(changed_files[:20]) if changed_files else "?"
         prompt = (
             f"{prompt_template}\n\n"
             f"问题: {problem}\n方案: {solution}\n"
             f"文件: {files_str}\n"
-            f"用 git diff {base_branch}...FETCH_HEAD 获取diff"
+            f"diff: git diff {base_branch}...{head_sha}"
         )
 
         timeout = self.config.auto_review.claude_timeout
