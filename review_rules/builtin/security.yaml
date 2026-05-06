@@ -1,0 +1,84 @@
+rules:
+  # --------------------------------------------------------------------------
+  # C-SEC-001: Unsafe function strcpy
+  # --------------------------------------------------------------------------
+  - id: C-SEC-001
+    severity: error
+    category: security
+    description: "Unsafe function strcpy"
+    pattern:
+      type: regex
+      value: '\bstrcpy\s*\('
+    message: "Use of strcpy() can cause buffer overflows. Prefer strncpy(), strlcpy(), or snprintf()."
+    include:
+      - '\.(?:c|h)$'
+
+  # --------------------------------------------------------------------------
+  # C-SEC-002: Unsafe function strcat
+  # --------------------------------------------------------------------------
+  - id: C-SEC-002
+    severity: error
+    category: security
+    description: "Unsafe function strcat"
+    pattern:
+      type: regex
+      value: '\bstrcat\s*\('
+    message: "Use of strcat() can cause buffer overflows. Prefer strncat() or strlcat()."
+    include:
+      - '\.(?:c|h)$'
+
+  # --------------------------------------------------------------------------
+  # C-SEC-003: Unsafe function sprintf
+  # --------------------------------------------------------------------------
+  - id: C-SEC-003
+    severity: error
+    category: security
+    description: "Unsafe function sprintf"
+    pattern:
+      type: regex
+      value: '\bsprintf\s*\('
+    message: "Use of sprintf() can cause buffer overflows. Prefer snprintf()."
+    include:
+      - '\.(?:c|h)$'
+
+  # --------------------------------------------------------------------------
+  # C-SEC-004: Unsafe function gets
+  # --------------------------------------------------------------------------
+  - id: C-SEC-004
+    severity: error
+    category: security
+    description: "Unsafe function gets"
+    pattern:
+      type: regex
+      value: '\bgets\s*\('
+    message: "Use of gets() is inherently unsafe and has been removed from C11. Prefer fgets()."
+    include:
+      - '\.(?:c|h)$'
+
+  # --------------------------------------------------------------------------
+  # C-SEC-005: Unsafe function scanf
+  # --------------------------------------------------------------------------
+  - id: C-SEC-005
+    severity: warning
+    category: security
+    description: "Unsafe function scanf"
+    pattern:
+      type: regex
+      value: '\bscanf\s*\('
+    message: "Use of scanf() can lead to buffer overflows. Prefer fgets() + sscanf() with field width limits."
+    include:
+      - '\.(?:c|h)$'
+
+  # --------------------------------------------------------------------------
+  # C-SEC-006: System call with user input
+  # --------------------------------------------------------------------------
+  - id: C-SEC-006
+    severity: warning
+    category: security
+    description: "System call with user input"
+    pattern:
+      type: regex
+      value: '\bsystem\s*\('
+    message: "Use of system() with user-controlled input can lead to command injection. Prefer execve() or a safer alternative."
+    include:
+      - '\.(?:c|h)$'
