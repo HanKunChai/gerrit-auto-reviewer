@@ -43,6 +43,45 @@ from review_rules.engine import ReviewEngine
 logger = logging.getLogger("auto-review-poller")
 
 
+def _parse_commit_msg(msg: str) -> tuple:
+    """从 commit message 中提取 问题/方案 两段。
+
+    预期格式::
+        问题现象: xxx
+        方案: xxx
+        功能说明: xxx
+        解决办法: xxx
+    """
+    import re
+    problem = ""
+    solution = ""
+
+    for line in msg.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        # 要求关键词后跟冒号，避免误匹配
+        m = re.match(r'^(问题现象|功能说明|问题描述|Bug|缺陷)[:：]\s*(.*)', line, re.IGNORECASE)
+        if m:
+            problem = m.group(2) or line
+            continue
+        m = re.match(r'^(方案|解决办法|修复方案|解决方案|Fix|Solution)[:：]\s*(.*)', line, re.IGNORECASE)
+        if m:
+            solution = m.group(2) or line
+            continue
+        if problem and not solution:
+            problem += " " + line
+        elif solution:
+            solution += " " + line
+
+    # If no structured format found, use first 200 chars as problem
+    if not problem and not solution:
+        problem = msg[:200].replace("\n", " ")
+        solution = "(见commit message)"
+
+    return (problem or "(无)", solution or "(无)")
+
+
 class AutoReviewPoller:
     """Gerrit 自动评审轮询器。
 
@@ -320,11 +359,13 @@ class AutoReviewPoller:
         except FileNotFoundError:
             logger.warning("  未找到评审模板，使用默认提示")
 
-        # Build prompt (fast — template already has all instructions)
+        # 从 commit message 提取关键信息
+        problem, solution = _parse_commit_msg(commit_msg)
+
+        # Build prompt
         prompt = (
             f"{prompt_template}\n\n"
-            f"变更: {change_id}\n目标分支: {base_branch}\n"
-            f"Commit Message:\n{commit_msg}\n\n"
+            f"问题: {problem}\n方案: {solution}\n"
             f"```diff\n{diff_text}\n```"
         )
 
@@ -335,7 +376,8 @@ class AutoReviewPoller:
             overhead = len(prompt) - len(diff_text)
             diff_limit = max_chars - overhead - 50
             prompt = (
-                f"{prompt_template}\n\n{change_id}\n{commit_msg}\n"
+                f"{prompt_template}\n\n"
+                f"问题: {problem}\n方案: {solution}\n"
                 f"```diff\n{diff_text[:diff_limit]}\n```"
             )
 
