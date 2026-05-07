@@ -1,0 +1,61 @@
+mode: "local_test"
+
+gerrit:
+  base_url: "http://gerrit.your.company.com:port"
+  auth:
+    type: "http"
+    #username: 有权限访问Gerrit API的用户名，建议使用专门的服务账号
+    username: "code-reviewer"
+    # use_a_prefix: false  # 如果Nginx反向代理导致401，取消注释试试
+  # password from env: GERRIT_PASSWORD
+
+auto_review:
+  enabled: true
+  poll_interval: 600
+  reviewer: "code-reviewer"
+  query: "reviewer:code-reviewer+status:open"
+  max_changes_per_poll: 10
+  use_rules_engine: false
+  max_concurrent_reviews: 4
+  claude_timeout: 1800
+
+repo:
+  local_path: "./local-repo"
+  # remote_url 自动从 gerrit.base_url + 项目名拼接，无需手动配置
+  fallback_project: "default"
+  gerrit_remote: "gerrit"
+  initial_clone_depth: 10
+  auto_deepen: true
+  deepen_step: 100
+
+local_test:
+  repo_path: "./test-data/test-repo"
+  base_branch: "base"
+  feature_branch: "feature"
+
+# Webhook (optional - requires Gerrit admin to configure Event System)
+# Does NOT need to be enabled; polling is the default trigger mechanism.
+webhook:
+  enabled: false
+  host: "0.0.0.0"
+  port: 8081
+  max_concurrent_reviews: 3
+
+review:
+  skip_binary_files: true
+  skip_file_patterns:
+    - "*.o"
+    - "*.bin"
+    - "*.a"
+  min_review_score: -2
+  max_review_score: 2
+
+rules:
+  enabled: true
+  custom_rules_dir: "./review_rules/custom"
+
+cache:
+  enabled: true
+  dir: "./.cache/review-cache"
+  max_size_mb: 500
+  ttl_hours: 24

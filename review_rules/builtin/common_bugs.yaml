@@ -1,0 +1,107 @@
+rules:
+  # --------------------------------------------------------------------------
+  # C-BUG-001: Null pointer dereference
+  #
+  # Detects defensive ``ptr && *ptr`` style patterns.  While this is safe
+  # code, it indicates the developer is aware the pointer could be null --
+  # the reviewer should verify all code paths are properly guarded.
+  # --------------------------------------------------------------------------
+  - id: C-BUG-001
+    severity: error
+    category: common_bugs
+    description: "Null pointer dereference"
+    pattern:
+      type: regex
+      value: '\b\w+\s*&&\s*\*\w+'
+    message: "Potential null pointer guard detected: pointer checked before dereference. Verify all code paths handle NULL."
+    include:
+      - '\.(?:c|h)$'
+
+  # --------------------------------------------------------------------------
+  # C-BUG-002: Buffer overflow
+  #
+  # Catches ``memcpy``, ``memmove``, or ``strncpy`` calls where the size
+  # argument is a variable (not a constant), which may indicate an unchecked
+  # buffer operation.
+  # --------------------------------------------------------------------------
+  - id: C-BUG-002
+    severity: error
+    category: common_bugs
+    description: "Buffer overflow"
+    pattern:
+      type: regex
+      value: '\b(memcpy|memmove|strncpy)\s*\([^,]+,\s*[^,]+,\s*[a-zA-Z_]\w*\)'
+    message: "Potential buffer overflow: memory copy with a variable-size argument. Verify the destination buffer is large enough."
+    include:
+      - '\.(?:c|h)$'
+
+  # --------------------------------------------------------------------------
+  # C-BUG-003: Use after free
+  #
+  # Flags every ``free(ptr)`` call.  Static single-line regex cannot prove
+  # use-after-free, so this serves as a reviewer reminder to check that the
+  # freed pointer is not used again later.
+  # --------------------------------------------------------------------------
+  - id: C-BUG-003
+    severity: error
+    category: common_bugs
+    description: "Use after free"
+    pattern:
+      type: regex
+      value: '\bfree\s*\(\s*\w+\s*\)'
+    message: "Memory freed here. Verify the pointer is not dereferenced or passed to another free() after this point."
+    include:
+      - '\.(?:c|h)$'
+
+  # --------------------------------------------------------------------------
+  # C-BUG-004: Memory leak
+  #
+  # Flags allocation calls (malloc, calloc, realloc) as a reminder to verify
+  # that every allocated path has a matching free.
+  # --------------------------------------------------------------------------
+  - id: C-BUG-004
+    severity: warning
+    category: common_bugs
+    description: "Memory leak"
+    pattern:
+      type: regex
+      value: '\b(malloc|calloc|realloc|strdup|strndup)\s*\('
+    message: "Memory allocation detected. Verify every code path releases this memory with a matching free()."
+    include:
+      - '\.(?:c|h)$'
+
+  # --------------------------------------------------------------------------
+  # C-BUG-005: Division by zero
+  #
+  # Catches division (``/``) or modulo (``%``) where the divisor is an
+  # identifier rather than a literal constant.  The reviewer must confirm
+  # the divisor is guaranteed non-zero.
+  # --------------------------------------------------------------------------
+  - id: C-BUG-005
+    severity: warning
+    category: common_bugs
+    description: "Division by zero"
+    pattern:
+      type: regex
+      value: '[/%]\s*[a-zA-Z_]\w*'
+    message: "Division or modulo by a variable. Verify the denominator is guaranteed to be non-zero at runtime."
+    include:
+      - '\.(?:c|h)$'
+
+  # --------------------------------------------------------------------------
+  # C-BUG-006: Off-by-one
+  #
+  # Flags array accesses where the index is a variable (e.g. ``arr[size]``).
+  # Off-by-one errors occur when the index equals the allocation size; the
+  # valid range is 0..size-1.
+  # --------------------------------------------------------------------------
+  - id: C-BUG-006
+    severity: info
+    category: common_bugs
+    description: "Off-by-one"
+    pattern:
+      type: regex
+      value: '\w+\[\s*[a-zA-Z_]\w*\s*\]'
+    message: "Array access with a variable index. Verify the index is strictly less than the array size to avoid off-by-one errors."
+    include:
+      - '\.(?:c|h)$'

@@ -1,0 +1,79 @@
+rules:
+  # --------------------------------------------------------------------------
+  # C-STYLE-001: Function brace not on new line (Allman style)
+  # Matches lines that look like a function definition followed by '{'
+  # on the same line, e.g. ``int foo(void) {``
+  # --------------------------------------------------------------------------
+  - id: C-STYLE-001
+    severity: error
+    category: coding_style
+    description: "Function brace not on new line"
+    pattern:
+      type: regex
+      value: '^\s*\w+\s+\w+\s*\([^)]*\)\s*\{'
+    message: "Function opening brace should be on a new line (Allman style). Use ')\\n{' instead of ') {'."
+    include:
+      - '\.(?:c|h)$'
+
+  # --------------------------------------------------------------------------
+  # C-STYLE-002: Line exceeds 200 characters
+  # Matches lines that are 200 characters or longer
+  # --------------------------------------------------------------------------
+  - id: C-STYLE-002
+    severity: error
+    category: coding_style
+    description: "Line exceeds 200 characters"
+    pattern:
+      type: regex
+      value: '^.{200,}$'
+    message: "Line exceeds the maximum allowed length of 200 characters."
+    include:
+      - '\.(?:c|h)$'
+
+  # --------------------------------------------------------------------------
+  # C-STYLE-003: Variable not initialized at definition
+  # Matches ``type name;`` (or ``type name`` followed by ``;`` at end of
+  # line) where there is no ``=`` assignment.  Catches basic scalar types.
+  # --------------------------------------------------------------------------
+  - id: C-STYLE-003
+    severity: info
+    category: coding_style
+    description: "Variable not initialized at definition"
+    pattern:
+      type: regex
+      value: '\b(int|char|float|double|long|short|unsigned|signed|void|size_t|ssize_t|uint\d+_t|int\d+_t)\s+\w+\s*;\s*$'
+    message: "Variable should be initialized at the point of definition."
+    include:
+      - '\.(?:c|h)$'
+
+  # --------------------------------------------------------------------------
+  # C-STYLE-004: Multiple variables on one line
+  # Matches a comma followed by another variable name in what looks like
+  # a declaration, e.g. ``int x, y;``
+  # --------------------------------------------------------------------------
+  - id: C-STYLE-004
+    severity: warning
+    category: coding_style
+    description: "Multiple variables on one line"
+    pattern:
+      type: regex
+      value: ',\s*\w+\s*[=;]'
+    message: "Only one variable may be defined per line."
+    include:
+      - '\.(?:c|h)$'
+
+  # --------------------------------------------------------------------------
+  # C-STYLE-005: Local variable same name as global
+  # Matches indented (local) variable declarations inside functions.
+  # Flags reviewer to verify no global variable is being shadowed.
+  # --------------------------------------------------------------------------
+  - id: C-STYLE-005
+    severity: warning
+    category: coding_style
+    description: "Local variable same name as global"
+    pattern:
+      type: regex
+      value: '^\s+(?:int|char|float|double|long|short|unsigned|signed|void|size_t|ssize_t|uint\d+_t|int\d+_t)\s+\w+\s*[=;]'
+    message: "Local variable may shadow a global variable with the same name. Please verify no global shares this name."
+    include:
+      - '\.(?:c|h)$'
