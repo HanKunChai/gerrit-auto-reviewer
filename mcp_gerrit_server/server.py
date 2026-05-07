@@ -293,7 +293,7 @@ class GerritReviewServer:
         repo.ensure_branch(base_branch)
         sha = repo.fetch_change(change_number, revision)
         diff = repo.get_diff(base_branch, head_ref=sha)
-        files = repo.list_changed_files(base_branch)
+        files = repo.list_changed_files(base_branch, head_ref=sha)
         return {
             "change_id": change_id,
             "revision": revision,

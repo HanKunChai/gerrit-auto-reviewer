@@ -62,6 +62,12 @@ class GerritConfig:
         return self._password
 
 
+class DimensionConfig:
+    def __init__(self, data: dict):
+        self.name = data.get("name", "")
+        self.skills = data.get("skills", [])
+
+
 class AutoReviewConfig:
     def __init__(self, data: dict):
         self.enabled = data.get("enabled", True)
@@ -70,8 +76,15 @@ class AutoReviewConfig:
         self.query = data.get("query", "reviewer:code-reviewer+status:open")
         self.max_changes_per_poll = data.get("max_changes_per_poll", 10)
         self.use_rules_engine = data.get("use_rules_engine", False)
-        self.max_concurrent_reviews = data.get("max_concurrent_reviews", 4)
+        self.max_concurrent_reviews = data.get("max_concurrent_reviews", 2)
         self.claude_timeout = data.get("claude_timeout", 1800)
+        self.use_multi_dimension = data.get("use_multi_dimension", True)
+        self.dimension_timeout = data.get("dimension_timeout", 1800)
+        self.dimension_max_turns = data.get("dimension_max_turns", 8)
+        self.max_concurrent_claude = data.get("max_concurrent_claude", 4)
+        self.dimensions = [
+            DimensionConfig(d) for d in data.get("dimensions", [])
+        ]
 
 
 class RepoConfig:

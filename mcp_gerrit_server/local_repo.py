@@ -269,6 +269,10 @@ class LocalRepo:
     def fetch_change(self, change_id: str, revision: str = "1") -> str:
         """Fetch a specific Gerrit change ref and return the commit SHA.
 
+        Fetches to a named local ref (``refs/review/{change_id}/{revision}``)
+        instead of relying on ``FETCH_HEAD``, so that concurrent fetch
+        operations on the same repo do not race on a shared mutable ref.
+
         The Gerrit change ref is constructed as::
 
             refs/changes/{last2}/{change_id}/{revision}
@@ -286,7 +290,7 @@ class LocalRepo:
         Returns
         -------
         str
-            The SHA of ``FETCH_HEAD`` after the fetch.
+            The SHA of the fetched commit.
 
         Raises
         ------
@@ -295,17 +299,18 @@ class LocalRepo:
         """
         last2 = change_id[-2:].zfill(2)
         change_ref = f"refs/changes/{last2}/{change_id}/{revision}"
+        local_ref = f"refs/review/{change_id}/{revision}"
 
-        logger.info("fetching change ref %s from remote %s",
-                    change_ref, self.gerrit_remote)
+        logger.info("fetching change ref %s -> %s from remote %s",
+                    change_ref, local_ref, self.gerrit_remote)
 
         self._run_git(
-            ["fetch", self.gerrit_remote, change_ref],
+            ["fetch", self.gerrit_remote, f"{change_ref}:{local_ref}"],
             timeout=120,
         )
 
         sha = self._run_git(
-            ["rev-parse", "FETCH_HEAD"],
+            ["rev-parse", local_ref],
         ).stdout.strip()
 
         logger.info("fetched change %s/%s at %s", change_id, revision, sha)
@@ -471,6 +476,22 @@ class LocalRepo:
             return
         logger.info("running git gc --auto")
         self._run_git(["gc", "--auto"])
+
+    def cleanup_review_ref(self, change_id: str, revision: str = "1") -> None:
+        """Delete a local review ref created by :meth:`fetch_change`.
+
+        Parameters
+        ----------
+        change_id : str
+            Gerrit numeric change ID.
+        revision : str
+            Patch-set revision number (default ``"1"``).
+        """
+        local_ref = f"refs/review/{change_id}/{revision}"
+        try:
+            self._run_git(["update-ref", "-d", local_ref], check=False)
+        except Exception:
+            pass
 
     def sync(self) -> None:
         """Update all remote tracking branches and prune deleted ones.
