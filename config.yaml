@@ -16,8 +16,36 @@ auto_review:
   query: "reviewer:code-reviewer+status:open"
   max_changes_per_poll: 10
   use_rules_engine: false
-  max_concurrent_reviews: 4
+  max_concurrent_reviews: 2
   claude_timeout: 1800
+  use_multi_dimension: true
+  dimension_timeout: 1800
+  dimension_max_turns: 40
+  max_concurrent_claude: 4
+  dimensions:
+    - name: "问题解决评估"
+      skills:
+        - "problem-solving"
+    - name: "安全"
+      skills:
+        - "buffer-overflow"
+        - "injection"
+        - "unsafe-functions"
+    - name: "内存管理"
+      skills:
+        - "leak-detection"
+        - "use-after-free"
+        - "null-pointer"
+    - name: "编码规范"
+      skills:
+        - "brace-style"
+        - "line-limit"
+        - "variable-style"
+    - name: "逻辑正确性"
+      skills:
+        - "bounds-check"
+        - "return-value"
+        - "loop-termination"
 
 repo:
   local_path: "./local-repo"
