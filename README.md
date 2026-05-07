@@ -60,11 +60,20 @@ git clone <this-repo>
 cd gerrit-auto-reviewer
 
 # 安装依赖
-pip install -r requirements.txt
+# 方式 1：有外网或内网 PyPI 镜像
+# 直接把项目目录拷到目标 Linux 机器，然后
+bash install.sh
 
-# 复制并填写配置
-cp .env.example .env
-# 编辑 .env，填入 GERRIT_PASSWORD
+# 方式 2：纯内网无镜像（离线部署）
+
+
+# 在外网 Linux 机器上先下载依赖
+bash scripts/download_deps.sh    # 生成 offline-packages/
+
+# 把整个项目目录（含 offline-packages/）拷到内网机器
+# 然后在内网运行
+bash install.sh
+# install.sh 会自动检测 offline-packages/ 目录进行离线安装。
 ```
 
 ### 配置
@@ -83,6 +92,12 @@ auto_review:
   query: "reviewer:code-reviewer+status:open"
 ```
 
+编辑 `.env`
+
+```env
+GERRIT_PASSWORD=your_http_password_here
+```
+
 ### 运行
 
 ```bash
@@ -93,7 +108,14 @@ python scripts/auto_review_poller.py --mock --once --verbose
 python scripts/auto_review_poller.py --once --verbose
 
 # 持续后台运行（推荐生产使用）
-bash run.sh
+bash run.sh #被动模式
+
+# 启动轮询评审
+bash run.sh --poller
+
+# 或只跑一轮测试
+bash run.sh --poller --once
+
 # 或
 python scripts/auto_review_poller.py
 ```
