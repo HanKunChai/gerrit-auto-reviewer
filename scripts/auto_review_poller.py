@@ -278,18 +278,19 @@ class AutoReviewPoller:
         # 1. 获取 diff
         logger.info("  [1/3] 获取 diff...")
         repo = None
+        worktree_dir = None
         base_branch = "master"
         commit_msg = subject
         sha = ""
         if self.mock:
             diff_text = self._mock_diff()
             files = self._mock_files()
+            repo_dir = None
         else:
             repo = self._ensure_local_repo(project)
             try:
                 change_info = self._client.get_change(change_id)
                 base_branch = change_info.get("branch", base_branch)
-                # Get full commit message for business logic review
                 revisions = change_info.get("revisions", {})
                 if revisions:
                     rev_data = list(revisions.values())[0]
@@ -297,12 +298,15 @@ class AutoReviewPoller:
                     commit_msg = commit.get("message", subject)
             except Exception:
                 pass
-            # 先 fetch base branch（确保 base 存在），再 fetch change
             repo.ensure_branch(base_branch)
             sha = repo.fetch_change(change_number, rev_num)
             diff_text = repo.get_diff(base_branch, head_ref=sha, context_lines=3)
             files = repo.list_changed_files(base_branch, head_ref=sha)
             logger.info("  fetch SHA: %s", sha[:8] if sha else "N/A")
+
+            # 创建独立 worktree，Claude 在里面 cat 源文件读到的是变更后版本
+            worktree_dir = repo.create_worktree(sha, change_number, rev_num)
+            repo_dir = worktree_dir
 
         logger.info("  diff: %d 行, %d 个文件", len(diff_text.splitlines()), len(files))
         for status, fpath in files:
@@ -342,7 +346,6 @@ class AutoReviewPoller:
             issues = []
 
         # 3. Claude Code AI 评审
-        repo_dir = str(repo.repo_path) if hasattr(repo, 'repo_path') else None
         changed_files = [f for _, f in files]
         ar = self.config.auto_review
 
@@ -396,6 +399,13 @@ class AutoReviewPoller:
             try:
                 os.remove(diff_file)
             except OSError:
+                pass
+
+        # 清理 worktree
+        if worktree_dir and repo:
+            try:
+                repo.remove_worktree(worktree_dir)
+            except Exception:
                 pass
 
         # 清理本次 fetch 创建的 review ref，避免长期堆积

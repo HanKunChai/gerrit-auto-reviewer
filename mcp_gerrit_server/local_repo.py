@@ -506,6 +506,51 @@ class LocalRepo:
         except Exception:
             pass
 
+    def create_worktree(self, sha: str, change_id: str, revision: str) -> str:
+        """Create a detached worktree for review isolation.
+
+        Parameters
+        ----------
+        sha : str
+            Commit SHA to check out in the worktree.
+        change_id : str
+            Gerrit numeric change ID.
+        revision : str
+            Patch-set revision number.
+
+        Returns
+        -------
+        str
+            Absolute path to the new worktree.
+        """
+        wt_dir = self.repo_path.parent / "_review" / change_id / revision
+        wt_dir.parent.mkdir(parents=True, exist_ok=True)
+        # If an old worktree for this change+revision exists, remove it first
+        if wt_dir.exists():
+            try:
+                self._run_git(
+                    ["worktree", "remove", "--force", str(wt_dir)],
+                    check=False, timeout=30,
+                )
+            except Exception:
+                pass
+        logger.info("creating worktree at %s (sha=%s)", wt_dir, sha[:8])
+        self._run_git(
+            ["worktree", "add", "--detach", str(wt_dir), sha],
+            timeout=60,
+        )
+        return str(wt_dir)
+
+    def remove_worktree(self, worktree_path: str) -> None:
+        """Remove a review worktree and prune its administrative data."""
+        try:
+            self._run_git(
+                ["worktree", "remove", "--force", worktree_path],
+                check=False, timeout=30,
+            )
+        except Exception:
+            pass
+
     def sync(self) -> None:
         """Update all remote tracking branches and prune deleted ones.
 
