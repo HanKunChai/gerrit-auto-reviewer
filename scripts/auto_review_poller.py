@@ -300,7 +300,7 @@ class AutoReviewPoller:
             # 先 fetch base branch（确保 base 存在），再 fetch change
             repo.ensure_branch(base_branch)
             sha = repo.fetch_change(change_number, rev_num)
-            diff_text = repo.get_diff(base_branch, head_ref=sha)
+            diff_text = repo.get_diff(base_branch, head_ref=sha, context_lines=3)
             files = repo.list_changed_files(base_branch, head_ref=sha)
             logger.info("  fetch SHA: %s", sha[:8] if sha else "N/A")
 
@@ -363,6 +363,7 @@ class AutoReviewPoller:
             logger.info("  [3/4] Claude Code 评审...")
             claude_review = self._invoke_claude(
                 change_id, commit_msg, repo_dir, base_branch, changed_files, sha,
+                files_with_status=files,
             )
             if claude_review:
                 logger.info("  Claude 评审: %d 字符", len(claude_review))
@@ -641,6 +642,20 @@ class AutoReviewPoller:
 
         status_table = self._build_status_table(files_with_status)
         merged = "\n\n---\n\n".join(skill_bodies)
+
+        # Check if any skill in this dimension needs full source context
+        needs_ctx = any(
+            self._skill_registry.get(sn, {}).get("frontmatter", {}).get("needs_context")
+            for sn in dimension.skills
+        )
+        ctx_instruction = ""
+        if needs_ctx:
+            ctx_instruction = (
+                f"## 上下文要求（必须遵守）\n"
+                f"发现任何潜在问题时，必须 cat 源文件阅读完整函数上下文后再下结论，\n"
+                f"不能仅凭 diff 的 3 行片断定论。\n\n"
+            )
+
         return (
             f"{merged}\n\n"
             f"## 变更上下文\n"
@@ -648,6 +663,7 @@ class AutoReviewPoller:
             f"方案: {solution}\n"
             f"{status_table}\n"
             f"第一步必须执行: cat _review_diff.txt 读取diff内容\n\n"
+            f"{ctx_instruction}"
             f"## 输出约束（必须严格遵守）\n"
             f"- 只输出问题列表，每行一条: 文件:行号 [error/warning] 简短原因\n"
             f"- 禁止输出任何思考过程、分析推理、检查步骤\n"
