@@ -553,6 +553,7 @@ class AutoReviewPoller:
         ``key: value`` lines between ``---`` markers.  Only the leading
         ``---`` / ``---`` pair is parsed; ``---`` inside the body is safe.
         """
+        content = content.replace("\r\n", "\n")
         if not content.startswith("---\n"):
             return {}, content
         # Find the closing --- on its own line (must have leading newline)
@@ -739,8 +740,8 @@ class AutoReviewPoller:
             stripped = line.strip()
             if not stripped:
                 continue
-            # Always keep lines with file:line pattern (e.g. src/main.c:15)
-            if re.search(r"\S+\.\w+:\d+", stripped):
+            # Always keep lines with file:line pattern (e.g. src/main.c:15, Makefile:5)
+            if re.search(r"\S+:\d+", stripped):
                 cleaned.append(stripped)
                 continue
             # Keep conclusion lines
@@ -784,7 +785,8 @@ class AutoReviewPoller:
                     dim_result = re.sub(
                         r"\n?\s*No issues found\.?\s*$", "",
                         dim_result, flags=re.IGNORECASE,
-                    )
+                    ).strip()
+                if dim_result:
                     lines.append(dim_result)
                 else:
                     lines.append("*该维度评审未完成*")

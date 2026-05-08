@@ -16,6 +16,18 @@ from typing import List, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+_URL_CREDS_RE = __import__("re").compile(r"(://)[^@]+(@)")
+
+
+def _sanitize_url(url: str) -> str:
+    """Strip credentials from a URL for safe logging."""
+    return _URL_CREDS_RE.sub(r"\1***:***\2", url)
+
+
+# ---------------------------------------------------------------------------
 # Custom exception
 # ---------------------------------------------------------------------------
 
@@ -56,7 +68,8 @@ def _setup_gerrit_remote(repo: "LocalRepo") -> None:
         if existing != repo.gerrit_push_url:
             logger.info(
                 "updating remote %s from %s to %s",
-                repo.gerrit_remote, existing, repo.gerrit_push_url,
+                repo.gerrit_remote, _sanitize_url(existing),
+                _sanitize_url(repo.gerrit_push_url),
             )
             repo._run_git([
                 "remote", "set-url",
@@ -64,7 +77,7 @@ def _setup_gerrit_remote(repo: "LocalRepo") -> None:
             ])
     except GitCommandError:
         logger.info("adding remote %s -> %s",
-                    repo.gerrit_remote, repo.gerrit_push_url)
+                    repo.gerrit_remote, _sanitize_url(repo.gerrit_push_url))
         repo._run_git([
             "remote", "add",
             repo.gerrit_remote, repo.gerrit_push_url,
@@ -231,7 +244,7 @@ class LocalRepo:
             )
 
         logger.info("cloning %s into %s (depth=%d)",
-                    self.remote_url, repo_dir, self.initial_depth)
+                    _sanitize_url(self.remote_url), repo_dir, self.initial_depth)
 
         self._run_git(
             [
