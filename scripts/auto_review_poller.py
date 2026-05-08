@@ -684,6 +684,8 @@ class AutoReviewPoller:
 
     def _ensure_skill_files(self, repo_dir: str, dimensions) -> None:
         """Copy skill .md files to local-repo for Claude Code auto-discovery."""
+        if not repo_dir:
+            return
         dst_skills = Path(repo_dir) / ".claude" / "skills"
         try:
             dst_skills.mkdir(parents=True, exist_ok=True)
