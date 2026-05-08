@@ -312,6 +312,16 @@ class AutoReviewPoller:
             logger.warning("  变更无 diff 内容，跳过")
             return
 
+        # 将 diff 写入临时文件，Claude 通过 cat 读取（避免注入 prompt 撑爆上下文）
+        diff_file = None
+        if not self.mock and repo_dir and diff_text:
+            diff_file = os.path.join(repo_dir, "_review_diff.txt")
+            try:
+                with open(diff_file, "w", encoding="utf-8") as f:
+                    f.write(diff_text)
+            except OSError:
+                diff_file = None
+
         # 2. 运行本地规则引擎（仅在启用时）
         if self.config.auto_review.use_rules_engine:
             logger.info("  [2/4] 运行规则引擎...")
@@ -339,7 +349,7 @@ class AutoReviewPoller:
         if ar.use_multi_dimension and ar.dimensions:
             logger.info("  [3/4] 多维度并行评审 (%d 维度)...", len(ar.dimensions))
             dimension_results = self._invoke_claude_dimensions(
-                change_id, commit_msg, repo_dir, base_branch, changed_files, sha,
+                change_id, commit_msg, repo_dir, base_branch, files, sha,
             )
             valid = {k: v for k, v in dimension_results.items() if v}
             if not valid:
@@ -380,6 +390,13 @@ class AutoReviewPoller:
         else:
             logger.info("  [Mock] 评审已提交")
 
+        # 清理临时 diff 文件
+        if diff_file:
+            try:
+                os.remove(diff_file)
+            except OSError:
+                pass
+
         # 清理本次 fetch 创建的 review ref，避免长期堆积
         if not self.mock and repo:
             try:
@@ -396,6 +413,7 @@ class AutoReviewPoller:
         head_sha: str = "",
         prompt: Optional[str] = None,
         dimension: str = "",
+        files_with_status: Optional[List[tuple]] = None,
     ) -> Optional[str]:
         """Invoke Claude Code to review the diff in the local repo.
 
@@ -412,12 +430,12 @@ class AutoReviewPoller:
 
         if prompt is None:
             problem, solution = _parse_commit_msg(commit_msg)
-            files_str = ", ".join(changed_files[:20]) if changed_files else "?"
+            status_table = self._build_status_table(files_with_status or []) if files_with_status else ""
             prompt = (
                 f"{self._prompt_template}\n\n"
                 f"问题: {problem}\n方案: {solution}\n"
-                f"文件: {files_str}\n"
-                f"diff: git diff {base_branch}...{head_sha}"
+                f"{status_table}\n"
+                f"第一步必须执行: cat _review_diff.txt 读取diff内容"
             )
 
         ar = self.config.auto_review
@@ -594,9 +612,20 @@ class AutoReviewPoller:
                 logger.warning("无法加载 skill 文件: %s", sf, exc_info=True)
         return registry
 
+    def _build_status_table(self, files_with_status) -> str:
+        """Build a file status table so Claude knows what was added/modified/deleted."""
+        label = {"A": "[新增]", "M": "[修改]", "D": "[删除]", "R": "[重命名]", "C": "[复制]"}
+        lines = ["## 变更文件清单"]
+        for status, fpath in files_with_status:
+            lines.append(f"  {label.get(status, status)} {fpath}")
+        lines.append("")
+        lines.append("diff 格式: `-` 开头=删除的旧代码, `+` 开头=新增代码, 空格开头=上下文（未变更的行）。")
+        lines.append("评审时需结合上下文理解变更意图，不要只看 `+` 行。")
+        return "\n".join(lines)
+
     def _build_dimension_prompt(
         self, dimension, problem: str, solution: str,
-        files_str: str, diff_cmd: str,
+        files_with_status: list, base_branch: str, head_sha: str,
     ) -> str:
         """Build a prompt for one dimension by merging its skills + commit context."""
         skill_bodies = []
@@ -610,24 +639,25 @@ class AutoReviewPoller:
         if not skill_bodies:
             return ""
 
+        status_table = self._build_status_table(files_with_status)
         merged = "\n\n---\n\n".join(skill_bodies)
         return (
             f"{merged}\n\n"
             f"## 变更上下文\n"
             f"问题: {problem}\n"
             f"方案: {solution}\n"
-            f"变更文件: {files_str}\n"
-            f"获取diff: git diff {diff_cmd}\n\n"
+            f"{status_table}\n"
+            f"第一步必须执行: cat _review_diff.txt 读取diff内容\n\n"
             f"## 输出约束（必须严格遵守）\n"
             f"- 只输出问题列表，每行一条: 文件:行号 [error/warning] 简短原因\n"
             f"- 禁止输出任何思考过程、分析推理、检查步骤\n"
             f"- 禁止输出修复建议、代码示例、修改方案\n"
             f"- 禁止输出总结段落或统计数字\n"
-            f"- 无问题时只输出一行简短的“无问题”结论"
+            f"- 无问题时只输出一行简短的\"无问题\"结论"
         )
 
     def _ensure_skill_files(self, repo_dir: str, dimensions) -> None:
-        """Copy skill .md files to the local-repo so Claude Code auto-discovers them."""
+        """Copy skill .md files to local-repo for Claude Code auto-discovery."""
         dst_skills = Path(repo_dir) / ".claude" / "skills"
         try:
             dst_skills.mkdir(parents=True, exist_ok=True)
@@ -653,13 +683,11 @@ class AutoReviewPoller:
     def _invoke_claude_dimensions(
         self, change_id: str, commit_msg: str,
         repo_dir: str, base_branch: str,
-        changed_files: list, head_sha: str,
+        files_with_status: list, head_sha: str,
     ) -> dict:
         """Run all configured dimensions in parallel, return {dim_name: result}."""
         ar = self.config.auto_review
         problem, solution = _parse_commit_msg(commit_msg)
-        files_str = ", ".join(changed_files[:20]) if changed_files else "?"
-        diff_cmd = f"{base_branch}...{head_sha}"
 
         # Copy skills to repo so Claude Code can load them
         self._ensure_skill_files(repo_dir, ar.dimensions)
@@ -669,7 +697,7 @@ class AutoReviewPoller:
 
         def _run(dim):
             prompt = self._build_dimension_prompt(
-                dim, problem, solution, files_str, diff_cmd,
+                dim, problem, solution, files_with_status, base_branch, head_sha,
             )
             if not prompt:
                 with lock:
