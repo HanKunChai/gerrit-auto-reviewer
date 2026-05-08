@@ -450,12 +450,7 @@ class AutoReviewPoller:
             )
 
         ar = self.config.auto_review
-        if dimension:
-            timeout = ar.dimension_timeout
-            max_turns = str(ar.dimension_max_turns)
-        else:
-            timeout = ar.claude_timeout
-            max_turns = "10"
+        timeout = ar.dimension_timeout if dimension else ar.claude_timeout
 
         dim_tag = f"[{dimension}] " if dimension else ""
         logger.info("  %s调用 Claude Code (cwd=%s, prompt=%d chars, timeout=%ds)...",
@@ -467,7 +462,6 @@ class AutoReviewPoller:
         cmd = [
             claude_bin, "-p", prompt,
             "--dangerously-skip-permissions",
-            "--max-turns", max_turns,
         ]
         if repo_dir and os.path.isdir(repo_dir):
             cwd = repo_dir
@@ -543,23 +537,6 @@ class AutoReviewPoller:
             if not output:
                 logger.warning("  Claude 返回空输出 (%.0fs, stderr=%d行)",
                                elapsed, len(stderr_lines))
-                return None
-
-            # Check if Claude hit --max-turns limit (>=10 turns = failure)
-            _MAX_TURN_PATTERNS = [
-                r"(max|maximum|超?过|达到|超出).*(turn|轮次|次数|限制)",
-                r"(turn|轮次|回合).*(limit|限制).*(reach|达到|超出|超过)",
-                r"limit.*(reach|hit|exceeded|耗尽|用完)",
-            ]
-            combined = "|".join(f"(?:{p})" for p in _MAX_TURN_PATTERNS)
-            max_turns_hit = any(
-                re.search(combined, line, re.IGNORECASE)
-                for line in stderr_lines
-            )
-            if not max_turns_hit:
-                max_turns_hit = bool(re.search(combined, output, re.IGNORECASE))
-            if max_turns_hit:
-                logger.error("  Claude 达到最大 turns 限制 (--max-turns 10), 视为失败，跳过上报")
                 return None
 
             claude_logger.debug("[done] rc=0 elapsed=%.0fs stdout=%d stderr=%d",

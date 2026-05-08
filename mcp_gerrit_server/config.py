@@ -80,7 +80,6 @@ class AutoReviewConfig:
         self.claude_timeout = data.get("claude_timeout", 1800)
         self.use_multi_dimension = data.get("use_multi_dimension", True)
         self.dimension_timeout = data.get("dimension_timeout", 1800)
-        self.dimension_max_turns = data.get("dimension_max_turns", 8)
         self.max_concurrent_claude = data.get("max_concurrent_claude", 4)
         self.dimensions = [
             DimensionConfig(d) for d in data.get("dimensions", [])
