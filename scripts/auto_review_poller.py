@@ -540,12 +540,8 @@ class AutoReviewPoller:
                                elapsed, len(stderr_lines))
                 return None
 
-            # Parse JSON output (--output-format json), fallback to raw text
-            try:
-                parsed = json.loads(output)
-            except (json.JSONDecodeError, ValueError):
-                parsed = output
-                claude_logger.debug("json parse failed, keeping raw text")
+            # Extract review JSON from Claude Code's wrapper output
+            parsed = self._extract_review_json(output)
 
             claude_logger.debug("[done] rc=0 elapsed=%.0fs stdout=%d stderr=%d",
                                 elapsed, len(output), len(stderr_lines))
@@ -825,6 +821,50 @@ class AutoReviewPoller:
                 continue
             cleaned.append(stripped)
         return "\n".join(cleaned) if cleaned else (text or "")
+
+    def _extract_review_json(self, raw: str):
+        """Extract review JSON from Claude Code --output-format json wrapper.
+
+        The outer wrapper is: {type, result: "<think>...</think>\\n```json\\n{...}\\n```", ...}
+        We need to strip thinking blocks and extract the actual review JSON.
+        Returns parsed dict or raw str on failure.
+        """
+        # Parse outer JSON wrapper
+        try:
+            wrapper = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            return raw  # not JSON, return raw text
+
+        # Get the actual Claude response text
+        result_text = ""
+        if isinstance(wrapper, dict):
+            result_text = wrapper.get("result", "")
+        if not result_text:
+            return raw  # no result field, return wrapper itself (might be direct JSON)
+
+        # Strip thinking XML blocks
+        text = result_text
+        text = re.sub(r"<think[^>]*>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
+        # Handle incomplete thinking block (no closing tag)
+        text = re.sub(r"<think[^>]*>.*", "", text, flags=re.DOTALL | re.IGNORECASE)
+
+        # Extract JSON from ```json code block
+        m = re.search(r"```(?:json)?\s*\n?(\{.*?\})\s*```", text, re.DOTALL)
+        if m:
+            try:
+                return json.loads(m.group(1))
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+        # Try parsing the cleaned text directly as JSON
+        try:
+            return json.loads(text.strip())
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+        # Fallback: return text without thinking blocks
+        cleaned = re.sub(r"```[^`]*```", "", text).strip()
+        return cleaned or raw
 
     def _format_verdict(self, d: dict) -> str:
         """Format a problem-solving verdict dict into clean text."""
