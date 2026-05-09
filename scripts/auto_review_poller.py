@@ -35,7 +35,7 @@ PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_DIR)
 
 # 评审系统版本号 — 变更后已评审的变更会被重新评审
-REVIEWER_VERSION = "v4"
+REVIEWER_VERSION = "v5"
 
 from mcp_gerrit_server.config import load_config
 from mcp_gerrit_server.gerrit_client import GerritClient
@@ -278,18 +278,19 @@ class AutoReviewPoller:
         # 1. 获取 diff
         logger.info("  [1/3] 获取 diff...")
         repo = None
+        worktree_dir = None
         base_branch = "master"
         commit_msg = subject
         sha = ""
         if self.mock:
             diff_text = self._mock_diff()
             files = self._mock_files()
+            repo_dir = None
         else:
             repo = self._ensure_local_repo(project)
             try:
                 change_info = self._client.get_change(change_id)
                 base_branch = change_info.get("branch", base_branch)
-                # Get full commit message for business logic review
                 revisions = change_info.get("revisions", {})
                 if revisions:
                     rev_data = list(revisions.values())[0]
@@ -297,12 +298,15 @@ class AutoReviewPoller:
                     commit_msg = commit.get("message", subject)
             except Exception:
                 pass
-            # 先 fetch base branch（确保 base 存在），再 fetch change
             repo.ensure_branch(base_branch)
             sha = repo.fetch_change(change_number, rev_num)
-            diff_text = repo.get_diff(base_branch, head_ref=sha)
+            diff_text = repo.get_diff(base_branch, head_ref=sha, context_lines=3)
             files = repo.list_changed_files(base_branch, head_ref=sha)
             logger.info("  fetch SHA: %s", sha[:8] if sha else "N/A")
+
+            # 创建独立 worktree，Claude 在里面 cat 源文件读到的是变更后版本
+            worktree_dir = repo.create_worktree(sha, change_number, rev_num)
+            repo_dir = worktree_dir
 
         logger.info("  diff: %d 行, %d 个文件", len(diff_text.splitlines()), len(files))
         for status, fpath in files:
@@ -311,6 +315,16 @@ class AutoReviewPoller:
         if not diff_text.strip():
             logger.warning("  变更无 diff 内容，跳过")
             return
+
+        # 将 diff 写入临时文件，Claude 通过 cat 读取（避免注入 prompt 撑爆上下文）
+        diff_file = None
+        if not self.mock and repo_dir and diff_text:
+            diff_file = os.path.join(repo_dir, "_review_diff.txt")
+            try:
+                with open(diff_file, "w", encoding="utf-8") as f:
+                    f.write(diff_text)
+            except OSError:
+                diff_file = None
 
         # 2. 运行本地规则引擎（仅在启用时）
         if self.config.auto_review.use_rules_engine:
@@ -332,14 +346,13 @@ class AutoReviewPoller:
             issues = []
 
         # 3. Claude Code AI 评审
-        repo_dir = str(repo.repo_path) if hasattr(repo, 'repo_path') else None
         changed_files = [f for _, f in files]
         ar = self.config.auto_review
 
         if ar.use_multi_dimension and ar.dimensions:
             logger.info("  [3/4] 多维度并行评审 (%d 维度)...", len(ar.dimensions))
             dimension_results = self._invoke_claude_dimensions(
-                change_id, commit_msg, repo_dir, base_branch, changed_files, sha,
+                change_id, commit_msg, repo_dir, base_branch, files, sha,
             )
             valid = {k: v for k, v in dimension_results.items() if v}
             if not valid:
@@ -353,6 +366,7 @@ class AutoReviewPoller:
             logger.info("  [3/4] Claude Code 评审...")
             claude_review = self._invoke_claude(
                 change_id, commit_msg, repo_dir, base_branch, changed_files, sha,
+                files_with_status=files,
             )
             if claude_review:
                 logger.info("  Claude 评审: %d 字符", len(claude_review))
@@ -380,6 +394,20 @@ class AutoReviewPoller:
         else:
             logger.info("  [Mock] 评审已提交")
 
+        # 清理临时 diff 文件
+        if diff_file:
+            try:
+                os.remove(diff_file)
+            except OSError:
+                pass
+
+        # 清理 worktree
+        if worktree_dir and repo:
+            try:
+                repo.remove_worktree(worktree_dir)
+            except Exception:
+                pass
+
         # 清理本次 fetch 创建的 review ref，避免长期堆积
         if not self.mock and repo:
             try:
@@ -396,6 +424,7 @@ class AutoReviewPoller:
         head_sha: str = "",
         prompt: Optional[str] = None,
         dimension: str = "",
+        files_with_status: Optional[List[tuple]] = None,
     ) -> Optional[str]:
         """Invoke Claude Code to review the diff in the local repo.
 
@@ -412,21 +441,16 @@ class AutoReviewPoller:
 
         if prompt is None:
             problem, solution = _parse_commit_msg(commit_msg)
-            files_str = ", ".join(changed_files[:20]) if changed_files else "?"
+            status_table = self._build_status_table(files_with_status or []) if files_with_status else ""
             prompt = (
                 f"{self._prompt_template}\n\n"
                 f"问题: {problem}\n方案: {solution}\n"
-                f"文件: {files_str}\n"
-                f"diff: git diff {base_branch}...{head_sha}"
+                f"{status_table}\n"
+                f"第一步必须执行: cat _review_diff.txt 读取diff内容"
             )
 
         ar = self.config.auto_review
-        if dimension:
-            timeout = ar.dimension_timeout
-            max_turns = str(ar.dimension_max_turns)
-        else:
-            timeout = ar.claude_timeout
-            max_turns = "10"
+        timeout = ar.dimension_timeout if dimension else ar.claude_timeout
 
         dim_tag = f"[{dimension}] " if dimension else ""
         logger.info("  %s调用 Claude Code (cwd=%s, prompt=%d chars, timeout=%ds)...",
@@ -437,8 +461,8 @@ class AutoReviewPoller:
 
         cmd = [
             claude_bin, "-p", prompt,
+            "--output-format", "json",
             "--dangerously-skip-permissions",
-            "--max-turns", max_turns,
         ]
         if repo_dir and os.path.isdir(repo_dir):
             cwd = repo_dir
@@ -516,27 +540,13 @@ class AutoReviewPoller:
                                elapsed, len(stderr_lines))
                 return None
 
-            # Check if Claude hit --max-turns limit (>=10 turns = failure)
-            _MAX_TURN_PATTERNS = [
-                r"(max|maximum|超?过|达到|超出).*(turn|轮次|次数|限制)",
-                r"(turn|轮次|回合).*(limit|限制).*(reach|达到|超出|超过)",
-                r"limit.*(reach|hit|exceeded|耗尽|用完)",
-            ]
-            combined = "|".join(f"(?:{p})" for p in _MAX_TURN_PATTERNS)
-            max_turns_hit = any(
-                re.search(combined, line, re.IGNORECASE)
-                for line in stderr_lines
-            )
-            if not max_turns_hit:
-                max_turns_hit = bool(re.search(combined, output, re.IGNORECASE))
-            if max_turns_hit:
-                logger.error("  Claude 达到最大 turns 限制 (--max-turns 10), 视为失败，跳过上报")
-                return None
+            # Extract review JSON from Claude Code's wrapper output
+            parsed = self._extract_review_json(output)
 
             claude_logger.debug("[done] rc=0 elapsed=%.0fs stdout=%d stderr=%d",
                                 elapsed, len(output), len(stderr_lines))
             logger.info("  Claude 完成 (%.0fs, %d 字符)", elapsed, len(output))
-            return output
+            return parsed
 
         except Exception as e:
             logger.error("  Claude 调用失败: %s", e)
@@ -553,6 +563,7 @@ class AutoReviewPoller:
         ``key: value`` lines between ``---`` markers.  Only the leading
         ``---`` / ``---`` pair is parsed; ``---`` inside the body is safe.
         """
+        content = content.replace("\r\n", "\n")
         if not content.startswith("---\n"):
             return {}, content
         # Find the closing --- on its own line (must have leading newline)
@@ -593,9 +604,20 @@ class AutoReviewPoller:
                 logger.warning("无法加载 skill 文件: %s", sf, exc_info=True)
         return registry
 
+    def _build_status_table(self, files_with_status) -> str:
+        """Build a file status table so Claude knows what was added/modified/deleted."""
+        label = {"A": "[新增]", "M": "[修改]", "D": "[删除]", "R": "[重命名]", "C": "[复制]"}
+        lines = ["## 变更文件清单"]
+        for status, fpath in files_with_status:
+            lines.append(f"  {label.get(status, status)} {fpath}")
+        lines.append("")
+        lines.append("diff 格式: `-` 开头=删除的旧代码, `+` 开头=新增代码, 空格开头=上下文（未变更的行）。")
+        lines.append("评审时需结合上下文理解变更意图，不要只看 `+` 行。")
+        return "\n".join(lines)
+
     def _build_dimension_prompt(
         self, dimension, problem: str, solution: str,
-        files_str: str, diff_cmd: str,
+        files_with_status: list, base_branch: str, head_sha: str,
     ) -> str:
         """Build a prompt for one dimension by merging its skills + commit context."""
         skill_bodies = []
@@ -609,24 +631,48 @@ class AutoReviewPoller:
         if not skill_bodies:
             return ""
 
+        status_table = self._build_status_table(files_with_status)
         merged = "\n\n---\n\n".join(skill_bodies)
+
+        # Check if any skill in this dimension needs full source context
+        needs_ctx = any(
+            self._skill_registry.get(sn, {}).get("frontmatter", {}).get("needs_context")
+            for sn in dimension.skills
+        )
+        ctx_instruction = ""
+        if needs_ctx:
+            ctx_instruction = (
+                f"## 上下文要求（必须遵守）\n"
+                f"发现任何潜在问题时，必须 cat 源文件阅读完整函数上下文后再下结论，\n"
+                f"不能仅凭 diff 的 3 行片断定论。\n\n"
+            )
+
         return (
             f"{merged}\n\n"
             f"## 变更上下文\n"
             f"问题: {problem}\n"
             f"方案: {solution}\n"
-            f"变更文件: {files_str}\n"
-            f"获取diff: git diff {diff_cmd}\n\n"
-            f"## 输出约束（必须严格遵守）\n"
-            f"- 只输出问题列表，每行一条: 文件:行号 [error/warning] 简短原因\n"
-            f"- 禁止输出任何思考过程、分析推理、检查步骤\n"
-            f"- 禁止输出修复建议、代码示例、修改方案\n"
-            f"- 禁止输出总结段落或统计数字\n"
-            f"- 无问题时只输出一行简短的“无问题”结论"
+            f"{status_table}\n"
+            f"第一步必须执行: cat _review_diff.txt 读取diff内容\n\n"
+            f"{ctx_instruction}"
+            f"## 输出格式（--output-format json，必须输出纯JSON，禁止任何其他文本）\n"
+            + (
+                f"```json\n"
+                f'{{"verdict": "已解决|部分解决|未解决", "reason": "一句话原因", "gaps": ["遗漏项"], "side_effects": ["副作用"]}}\n'
+                f"```\n"
+                f"gaps/side_effects 为空时输出 []。\n"
+                if "评估" in dimension.name else
+                f"```json\n"
+                f'{{"issues": [{{"file": "src/x.c", "line": 15, "severity": "error", "message": "简短原因"}}]}}\n'
+                f"```\n"
+                f"无问题时 issues 为空数组。severity 只取 error 或 warning。\n"
+            )
         )
 
     def _ensure_skill_files(self, repo_dir: str, dimensions) -> None:
-        """Copy skill .md files to the local-repo so Claude Code auto-discovers them."""
+        """Copy skill .md files to local-repo for Claude Code auto-discovery."""
+        if not repo_dir:
+            return
         dst_skills = Path(repo_dir) / ".claude" / "skills"
         try:
             dst_skills.mkdir(parents=True, exist_ok=True)
@@ -652,13 +698,11 @@ class AutoReviewPoller:
     def _invoke_claude_dimensions(
         self, change_id: str, commit_msg: str,
         repo_dir: str, base_branch: str,
-        changed_files: list, head_sha: str,
+        files_with_status: list, head_sha: str,
     ) -> dict:
         """Run all configured dimensions in parallel, return {dim_name: result}."""
         ar = self.config.auto_review
         problem, solution = _parse_commit_msg(commit_msg)
-        files_str = ", ".join(changed_files[:20]) if changed_files else "?"
-        diff_cmd = f"{base_branch}...{head_sha}"
 
         # Copy skills to repo so Claude Code can load them
         self._ensure_skill_files(repo_dir, ar.dimensions)
@@ -668,7 +712,7 @@ class AutoReviewPoller:
 
         def _run(dim):
             prompt = self._build_dimension_prompt(
-                dim, problem, solution, files_str, diff_cmd,
+                dim, problem, solution, files_with_status, base_branch, head_sha,
             )
             if not prompt:
                 with lock:
@@ -732,26 +776,99 @@ class AutoReviewPoller:
         return repo
 
     def _strip_thinking(self, text: str) -> str:
-        """Remove verbose thinking/analysis lines from Claude output."""
-        lines = text.splitlines()
+        """Remove verbose thinking/analysis lines from Claude output.
+
+        ``_extract_review_json`` already strips XML ``<thinking>`` blocks
+        before this is called, so only heuristic line-level filtering is
+        applied here.
+        """
         cleaned = []
-        for line in lines:
+        for line in text.splitlines():
             stripped = line.strip()
             if not stripped:
                 continue
-            # Always keep lines with file:line pattern (e.g. src/main.c:15)
-            if re.search(r"\S+\.\w+:\d+", stripped):
+            # Always keep lines with file:line pattern
+            if re.search(r"\S+:\d+", stripped):
                 cleaned.append(stripped)
                 continue
-            # Keep conclusion lines
-            if stripped.startswith("[已解决") or stripped.startswith("[部分解决") or stripped.startswith("[未解决"):
+            # Keep verdict/conclusion lines
+            if any(stripped.startswith(p) for p in ("[已解决", "[部分解决", "[未解决")):
                 cleaned.append(stripped)
                 continue
-            # Skip long prose lines (no file:line, probably thinking/analysis)
-            if len(stripped) > 60:
+            # Skip long lines that lack actionable structure
+            if len(stripped) > 120 and not any(c in stripped for c in (":", "-")):
                 continue
             cleaned.append(stripped)
         return "\n".join(cleaned) if cleaned else (text or "")
+
+    def _extract_review_json(self, raw: str):
+        """Extract review JSON from Claude Code --output-format json wrapper.
+
+        The outer wrapper is: {type, result: "<think>...</think>\\n```json\\n{...}\\n```", ...}
+        We need to strip thinking blocks and extract the actual review JSON.
+        Returns parsed dict or raw str on failure.
+        """
+        # Parse outer JSON wrapper
+        try:
+            wrapper = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            return raw  # not JSON, return raw text
+
+        # Get the actual Claude response text
+        result_text = ""
+        if isinstance(wrapper, dict):
+            result_text = wrapper.get("result", "")
+        if not result_text:
+            return raw  # no result field, return wrapper itself (might be direct JSON)
+
+        # Strip thinking XML blocks
+        text = result_text
+        text = re.sub(r"<think[^>]*>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
+        # Handle incomplete thinking block (no closing tag)
+        text = re.sub(r"<think[^>]*>.*", "", text, flags=re.DOTALL | re.IGNORECASE)
+
+        # Extract JSON from ```json code block
+        m = re.search(r"```(?:json)?\s*\n?(\{.*?\})\s*```", text, re.DOTALL)
+        if m:
+            try:
+                return json.loads(m.group(1))
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+        # Try parsing the cleaned text directly as JSON
+        try:
+            return json.loads(text.strip())
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+        # Fallback: return text without thinking blocks
+        cleaned = re.sub(r"```[^`]*```", "", text).strip()
+        return cleaned or raw
+
+    def _format_verdict(self, d: dict) -> str:
+        """Format a problem-solving verdict dict into clean text."""
+        v = d.get("verdict", "?")
+        r = d.get("reason", "")
+        text = f"[{v}] {r}"
+        for g in d.get("gaps", []) or []:
+            text += f"\n  遗漏: {g}"
+        for s in d.get("side_effects", []) or []:
+            text += f"\n  副作用: {s}"
+        return text
+
+    def _format_issues(self, d: dict) -> str:
+        """Format issues list into clean text."""
+        items = d.get("issues", []) or []
+        if not items:
+            return "无问题。"
+        lines = []
+        for item in items:
+            f = item.get("file", "?")
+            ln = item.get("line", 0)
+            sev = item.get("severity", "warning")
+            msg = item.get("message", "")
+            lines.append(f"{f}:{ln} [{sev}] {msg}")
+        return "\n".join(lines)
 
     def _build_review_message(
         self, change_id: str, subject: str, issues,
@@ -760,46 +877,50 @@ class AutoReviewPoller:
         """构造评审消息。
 
         *claude_review* can be a str (single-dimension, backward-compat),
-        a dict of ``{dim_name: result_text}`` (multi-dimension), or None.
+        a dict of ``{dim_name: result}`` (multi-dimension), or None.
+        Each result can be a parsed JSON dict or a raw str (fallback).
         """
         errors = [i for i in issues if i.severity == "error"]
         warnings = [i for i in issues if i.severity == "warning"]
         infos = [i for i in issues if i.severity == "info"]
 
         lines = [
-            "## 自动代码评审结果",
+            "========== 自动代码评审结果 ==========",
             "",
-            f"**变更**: {change_id}",
-            f"**标题**: {subject}",
+            f"变更: {change_id}",
+            f"标题: {subject}",
             "",
         ]
 
         if isinstance(claude_review, dict):
-            # Multi-dimension mode: one section per dimension
             for dim_name, dim_result in claude_review.items():
-                lines.append(f"### {dim_name}")
+                lines.append(f"--- {dim_name} ---")
                 lines.append("")
-                if dim_result:
-                    dim_result = self._strip_thinking(dim_result)
-                    dim_result = re.sub(
-                        r"\n?\s*No issues found\.?\s*$", "",
-                        dim_result, flags=re.IGNORECASE,
-                    )
-                    lines.append(dim_result)
+                if isinstance(dim_result, dict):
+                    if "verdict" in dim_result:
+                        lines.append(self._format_verdict(dim_result))
+                    elif "issues" in dim_result:
+                        lines.append(self._format_issues(dim_result))
+                    else:
+                        lines.append(str(dim_result))
+                elif isinstance(dim_result, str) and dim_result:
+                    lines.append(self._strip_thinking(dim_result))
                 else:
-                    lines.append("*该维度评审未完成*")
+                    lines.append("(该维度评审未完成)")
                 lines.append("")
-        elif isinstance(claude_review, str) and claude_review:
-            # Single-dimension mode (backward-compat)
-            claude_review = self._strip_thinking(claude_review)
-            normalized = re.sub(
-                r"\n?\s*No issues found\.?\s*$", "",
-                claude_review, flags=re.IGNORECASE,
-            )
-            lines.append("### Claude Code 评审")
-            lines.append("")
-            lines.append(normalized)
-            lines.append("")
+        elif claude_review:
+            if isinstance(claude_review, dict):
+                if "verdict" in claude_review:
+                    lines.append(self._format_verdict(claude_review))
+                elif "issues" in claude_review:
+                    lines.append(self._format_issues(claude_review))
+                else:
+                    lines.append(str(claude_review))
+            elif isinstance(claude_review, str):
+                lines.append("--- Claude Code 评审 ---")
+                lines.append("")
+                lines.append(self._strip_thinking(claude_review))
+                lines.append("")
 
         # 规则引擎结果（补充）
         if issues:
@@ -829,8 +950,8 @@ class AutoReviewPoller:
                     lines.append(f"- **{i.rule_id}** `{i.file}:{i.line}` {i.message}")
                 lines.append("")
 
-        lines.append("---")
-        lines.append("*由 Gerrit Auto-Review + Claude Code 自动生成*")
+        lines.append("----------")
+        lines.append("(Gerrit Auto-Review v5)")
         return "\n".join(lines)
 
     # ---- Mock 支持 ----

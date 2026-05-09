@@ -20,7 +20,6 @@ auto_review:
   claude_timeout: 1800
   use_multi_dimension: true
   dimension_timeout: 1800
-  dimension_max_turns: 40
   max_concurrent_claude: 4
   dimensions:
     - name: "问题解决评估"

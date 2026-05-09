@@ -16,6 +16,18 @@ from typing import List, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+_URL_CREDS_RE = __import__("re").compile(r"(://)[^@]+(@)")
+
+
+def _sanitize_url(url: str) -> str:
+    """Strip credentials from a URL for safe logging."""
+    return _URL_CREDS_RE.sub(r"\1***:***\2", url)
+
+
+# ---------------------------------------------------------------------------
 # Custom exception
 # ---------------------------------------------------------------------------
 
@@ -56,7 +68,8 @@ def _setup_gerrit_remote(repo: "LocalRepo") -> None:
         if existing != repo.gerrit_push_url:
             logger.info(
                 "updating remote %s from %s to %s",
-                repo.gerrit_remote, existing, repo.gerrit_push_url,
+                repo.gerrit_remote, _sanitize_url(existing),
+                _sanitize_url(repo.gerrit_push_url),
             )
             repo._run_git([
                 "remote", "set-url",
@@ -64,7 +77,7 @@ def _setup_gerrit_remote(repo: "LocalRepo") -> None:
             ])
     except GitCommandError:
         logger.info("adding remote %s -> %s",
-                    repo.gerrit_remote, repo.gerrit_push_url)
+                    repo.gerrit_remote, _sanitize_url(repo.gerrit_push_url))
         repo._run_git([
             "remote", "add",
             repo.gerrit_remote, repo.gerrit_push_url,
@@ -231,7 +244,7 @@ class LocalRepo:
             )
 
         logger.info("cloning %s into %s (depth=%d)",
-                    self.remote_url, repo_dir, self.initial_depth)
+                    _sanitize_url(self.remote_url), repo_dir, self.initial_depth)
 
         self._run_git(
             [
@@ -490,6 +503,51 @@ class LocalRepo:
         local_ref = f"refs/review/{change_id}/{revision}"
         try:
             self._run_git(["update-ref", "-d", local_ref], check=False)
+        except Exception:
+            pass
+
+    def create_worktree(self, sha: str, change_id: str, revision: str) -> str:
+        """Create a detached worktree for review isolation.
+
+        Parameters
+        ----------
+        sha : str
+            Commit SHA to check out in the worktree.
+        change_id : str
+            Gerrit numeric change ID.
+        revision : str
+            Patch-set revision number.
+
+        Returns
+        -------
+        str
+            Absolute path to the new worktree.
+        """
+        wt_dir = self.repo_path.parent / "_review" / change_id / revision
+        wt_dir.parent.mkdir(parents=True, exist_ok=True)
+        # If an old worktree for this change+revision exists, remove it first
+        if wt_dir.exists():
+            try:
+                self._run_git(
+                    ["worktree", "remove", "--force", str(wt_dir)],
+                    check=False, timeout=30,
+                )
+            except Exception:
+                pass
+        logger.info("creating worktree at %s (sha=%s)", wt_dir, sha[:8])
+        self._run_git(
+            ["worktree", "add", "--detach", str(wt_dir), sha],
+            timeout=60,
+        )
+        return str(wt_dir)
+
+    def remove_worktree(self, worktree_path: str) -> None:
+        """Remove a review worktree and prune its administrative data."""
+        try:
+            self._run_git(
+                ["worktree", "remove", "--force", worktree_path],
+                check=False, timeout=30,
+            )
         except Exception:
             pass
 
