@@ -15,7 +15,8 @@ strcpy/strcat/sprintf/gets/scanf、system()注入、内存泄漏、use-after-fre
 ### 逻辑
 数组越界/off-by-one、返回值未检查、循环终止错误、是否符合方案意图
 
-## 输出
-第一行必须输出问题解决结论: `[已解决/部分解决/未解决] 简要说明`
-然后列出具体问题（最多 10 条），每行: `文件:行号 [严重度] 描述`
-无具体问题时只输出结论，不要追加 `No issues found.`。
+## 输出（--output-format json，必须输出纯JSON）
+```json
+{"verdict": "已解决|部分解决|未解决", "reason": "一句话原因", "gaps": ["遗漏"], "side_effects": ["副作用"], "issues": [{"file": "src/x.c", "line": 15, "severity": "error", "message": "简短原因"}]}
+```
+verdict/reason 必填。gaps/side_effects/issues 为空时输出 []。

@@ -461,6 +461,7 @@ class AutoReviewPoller:
 
         cmd = [
             claude_bin, "-p", prompt,
+            "--output-format", "json",
             "--dangerously-skip-permissions",
         ]
         if repo_dir and os.path.isdir(repo_dir):
@@ -539,10 +540,17 @@ class AutoReviewPoller:
                                elapsed, len(stderr_lines))
                 return None
 
+            # Parse JSON output (--output-format json), fallback to raw text
+            parsed = output
+            try:
+                parsed = json.loads(output)
+            except (json.JSONDecodeError, ValueError):
+                claude_logger.debug("json parse failed, keeping raw text")
+
             claude_logger.debug("[done] rc=0 elapsed=%.0fs stdout=%d stderr=%d",
                                 elapsed, len(output), len(stderr_lines))
             logger.info("  Claude 完成 (%.0fs, %d 字符)", elapsed, len(output))
-            return output
+            return parsed or output
 
         except Exception as e:
             logger.error("  Claude 调用失败: %s", e)
@@ -651,12 +659,18 @@ class AutoReviewPoller:
             f"{status_table}\n"
             f"第一步必须执行: cat _review_diff.txt 读取diff内容\n\n"
             f"{ctx_instruction}"
-            f"## 输出约束（必须严格遵守）\n"
-            f"- 只输出问题列表，每行一条: 文件:行号 [error/warning] 简短原因\n"
-            f"- 禁止输出任何思考过程、分析推理、检查步骤\n"
-            f"- 禁止输出修复建议、代码示例、修改方案\n"
-            f"- 禁止输出总结段落或统计数字\n"
-            f"- 无问题时只输出一行简短的\"无问题\"结论"
+            f"## 输出格式（--output-format json，必须输出纯JSON，禁止任何其他文本）\n"
+            + (
+                f"```json\n"
+                f'{{"verdict": "已解决|部分解决|未解决", "reason": "一句话原因", "gaps": ["遗漏项"], "side_effects": ["副作用"]}}\n'
+                f"```\n"
+                f"gaps/side_effects 为空时输出 []。\n"
+                if "评估" in dimension.name else
+                f"```json\n"
+                f'{{"issues": [{{"file": "src/x.c", "line": 15, "severity": "error", "message": "简短原因"}}]}}\n'
+                f"```\n"
+                f"无问题时 issues 为空数组。severity 只取 error 或 warning。\n"
+            )
         )
 
     def _ensure_skill_files(self, repo_dir: str, dimensions) -> None:
@@ -812,6 +826,31 @@ class AutoReviewPoller:
             cleaned.append(stripped)
         return "\n".join(cleaned) if cleaned else (text or "")
 
+    def _format_verdict(self, d: dict) -> str:
+        """Format a problem-solving verdict dict into clean text."""
+        v = d.get("verdict", "?")
+        r = d.get("reason", "")
+        text = f"[{v}] {r}"
+        for g in d.get("gaps", []) or []:
+            text += f"\n  遗漏: {g}"
+        for s in d.get("side_effects", []) or []:
+            text += f"\n  副作用: {s}"
+        return text
+
+    def _format_issues(self, d: dict) -> str:
+        """Format issues list into clean text."""
+        items = d.get("issues", []) or []
+        if not items:
+            return "无问题。"
+        lines = []
+        for item in items:
+            f = item.get("file", "?")
+            ln = item.get("line", 0)
+            sev = item.get("severity", "warning")
+            msg = item.get("message", "")
+            lines.append(f"{f}:{ln} [{sev}] {msg}")
+        return "\n".join(lines)
+
     def _build_review_message(
         self, change_id: str, subject: str, issues,
         claude_review = None,
@@ -819,7 +858,8 @@ class AutoReviewPoller:
         """构造评审消息。
 
         *claude_review* can be a str (single-dimension, backward-compat),
-        a dict of ``{dim_name: result_text}`` (multi-dimension), or None.
+        a dict of ``{dim_name: result}`` (multi-dimension), or None.
+        Each result can be a parsed JSON dict or a raw str (fallback).
         """
         errors = [i for i in issues if i.severity == "error"]
         warnings = [i for i in issues if i.severity == "warning"]
@@ -837,27 +877,31 @@ class AutoReviewPoller:
             for dim_name, dim_result in claude_review.items():
                 lines.append(f"--- {dim_name} ---")
                 lines.append("")
-                if dim_result:
-                    dim_result = self._strip_thinking(dim_result)
-                    dim_result = re.sub(
-                        r"\n?\s*No issues found\.?\s*$", "",
-                        dim_result, flags=re.IGNORECASE,
-                    ).strip()
-                if dim_result:
-                    lines.append(dim_result)
+                if isinstance(dim_result, dict):
+                    if "verdict" in dim_result:
+                        lines.append(self._format_verdict(dim_result))
+                    elif "issues" in dim_result:
+                        lines.append(self._format_issues(dim_result))
+                    else:
+                        lines.append(str(dim_result))
+                elif isinstance(dim_result, str) and dim_result:
+                    lines.append(self._strip_thinking(dim_result))
                 else:
                     lines.append("(该维度评审未完成)")
                 lines.append("")
-        elif isinstance(claude_review, str) and claude_review:
-            claude_review = self._strip_thinking(claude_review)
-            normalized = re.sub(
-                r"\n?\s*No issues found\.?\s*$", "",
-                claude_review, flags=re.IGNORECASE,
-            )
-            lines.append("--- Claude Code 评审 ---")
-            lines.append("")
-            lines.append(normalized)
-            lines.append("")
+        elif claude_review:
+            if isinstance(claude_review, dict):
+                if "verdict" in claude_review:
+                    lines.append(self._format_verdict(claude_review))
+                elif "issues" in claude_review:
+                    lines.append(self._format_issues(claude_review))
+                else:
+                    lines.append(str(claude_review))
+            elif isinstance(claude_review, str):
+                lines.append("--- Claude Code 评审 ---")
+                lines.append("")
+                lines.append(self._strip_thinking(claude_review))
+                lines.append("")
 
         # 规则引擎结果（补充）
         if issues:
