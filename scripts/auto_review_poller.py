@@ -541,16 +541,16 @@ class AutoReviewPoller:
                 return None
 
             # Parse JSON output (--output-format json), fallback to raw text
-            parsed = output
             try:
                 parsed = json.loads(output)
             except (json.JSONDecodeError, ValueError):
+                parsed = output
                 claude_logger.debug("json parse failed, keeping raw text")
 
             claude_logger.debug("[done] rc=0 elapsed=%.0fs stdout=%d stderr=%d",
                                 elapsed, len(output), len(stderr_lines))
             logger.info("  Claude 完成 (%.0fs, %d 字符)", elapsed, len(output))
-            return parsed or output
+            return parsed
 
         except Exception as e:
             logger.error("  Claude 调用失败: %s", e)
