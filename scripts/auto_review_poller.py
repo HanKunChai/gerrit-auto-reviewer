@@ -767,9 +767,29 @@ class AutoReviewPoller:
 
     def _strip_thinking(self, text: str) -> str:
         """Remove verbose thinking/analysis lines from Claude output."""
-        # Strip thinking XML blocks first
-        text = re.sub(r"<thinking[^>]*>.*?</thinking>", "", text, flags=re.DOTALL | re.IGNORECASE)
         lines = text.splitlines()
+
+        # Strip thinking XML blocks (line-based, only complete pairs)
+        in_thinking = False
+        has_close = False
+        result_lines = []
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if re.match(r"</?thinking", stripped, re.IGNORECASE):
+                if stripped.startswith("<thinking"):
+                    in_thinking = True
+                    has_close = any(
+                        re.match(r"</thinking", lines[j].strip(), re.IGNORECASE)
+                        for j in range(i + 1, len(lines))
+                    )
+                else:
+                    in_thinking = False
+                continue
+            if in_thinking and has_close:
+                continue
+            result_lines.append(line)
+        lines = result_lines
+
         cleaned = []
         for line in lines:
             stripped = line.strip()
