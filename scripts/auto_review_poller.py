@@ -767,21 +767,26 @@ class AutoReviewPoller:
 
     def _strip_thinking(self, text: str) -> str:
         """Remove verbose thinking/analysis lines from Claude output."""
+        # Strip thinking XML blocks first
+        text = re.sub(r"<thinking[^>]*>.*?</thinking>", "", text, flags=re.DOTALL | re.IGNORECASE)
         lines = text.splitlines()
         cleaned = []
         for line in lines:
             stripped = line.strip()
             if not stripped:
                 continue
-            # Always keep lines with file:line pattern (e.g. src/main.c:15, Makefile:5)
+            # Always keep lines with file:line pattern
             if re.search(r"\S+:\d+", stripped):
                 cleaned.append(stripped)
                 continue
             # Keep conclusion lines
-            if stripped.startswith("[已解决") or stripped.startswith("[部分解决") or stripped.startswith("[未解决"):
+            if any(stripped.startswith(p) for p in ("[已解决", "[部分解决", "[未解决")):
                 cleaned.append(stripped)
                 continue
-            # Skip long prose lines (no file:line, probably thinking/analysis)
+            # Skip lines that look like thinking/analysis
+            if re.match(r"^(思考|分析|推理|评估过程|检查步骤|第一步|第二步|首先|然后|接下来|最后|综上|总结)", stripped):
+                continue
+            # Skip long prose lines
             if len(stripped) > 60:
                 continue
             cleaned.append(stripped)
@@ -801,17 +806,16 @@ class AutoReviewPoller:
         infos = [i for i in issues if i.severity == "info"]
 
         lines = [
-            "## 自动代码评审结果",
+            "========== 自动代码评审结果 ==========",
             "",
-            f"**变更**: {change_id}",
-            f"**标题**: {subject}",
+            f"变更: {change_id}",
+            f"标题: {subject}",
             "",
         ]
 
         if isinstance(claude_review, dict):
-            # Multi-dimension mode: one section per dimension
             for dim_name, dim_result in claude_review.items():
-                lines.append(f"### {dim_name}")
+                lines.append(f"--- {dim_name} ---")
                 lines.append("")
                 if dim_result:
                     dim_result = self._strip_thinking(dim_result)
@@ -822,16 +826,15 @@ class AutoReviewPoller:
                 if dim_result:
                     lines.append(dim_result)
                 else:
-                    lines.append("*该维度评审未完成*")
+                    lines.append("(该维度评审未完成)")
                 lines.append("")
         elif isinstance(claude_review, str) and claude_review:
-            # Single-dimension mode (backward-compat)
             claude_review = self._strip_thinking(claude_review)
             normalized = re.sub(
                 r"\n?\s*No issues found\.?\s*$", "",
                 claude_review, flags=re.IGNORECASE,
             )
-            lines.append("### Claude Code 评审")
+            lines.append("--- Claude Code 评审 ---")
             lines.append("")
             lines.append(normalized)
             lines.append("")
@@ -864,8 +867,8 @@ class AutoReviewPoller:
                     lines.append(f"- **{i.rule_id}** `{i.file}:{i.line}` {i.message}")
                 lines.append("")
 
-        lines.append("---")
-        lines.append("*由 Gerrit Auto-Review + Claude Code 自动生成*")
+        lines.append("----------")
+        lines.append("(Gerrit Auto-Review v4)")
         return "\n".join(lines)
 
     # ---- Mock 支持 ----
