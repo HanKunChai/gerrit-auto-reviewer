@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path
 import re
@@ -479,8 +480,9 @@ class AutoReviewPoller:
         claude_logger.propagate = False
         if not claude_logger.handlers:
             log_dir = os.path.join(PROJECT_DIR, "logs")
-            fh = logging.FileHandler(
-                os.path.join(log_dir, "claude_debug.log"), encoding="utf-8",
+            fh = RotatingFileHandler(
+                os.path.join(log_dir, "claude_debug.log"),
+                encoding="utf-8", maxBytes=10*1024*1024, backupCount=3,
             )
             fh.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
             claude_logger.addHandler(fh)
@@ -1079,6 +1081,20 @@ def main():
     log_file = setup_logging(args.verbose)
 
     poller = AutoReviewPoller(mock=args.mock, config_path=args.config)
+
+    # 启动时清理上次未清除的孤儿 worktree（进程崩溃/被kill后残留）
+    review_base = os.path.join(poller.config.repo.local_path, "_review")
+    if os.path.isdir(review_base):
+        removed = 0
+        for wt in list(os.scandir(review_base)):
+            try:
+                shutil.rmtree(wt.path)
+                removed += 1
+            except OSError:
+                pass
+        if removed:
+            logger.info("清理 %d 个孤儿 worktree", removed)
+
     interval = args.interval or poller.config.auto_review.poll_interval
     max_concurrent = poller.config.auto_review.max_concurrent_reviews
 
@@ -1118,10 +1134,8 @@ def main():
                 raise
 
     except KeyboardInterrupt:
-        logger.info("收到退出信号, 等待进行中评审完成...")
-        # Note: Python 3.8 不支持 shutdown(timeout=)，Claude 已通过
-        # --max-turns + claude_timeout 保证不会无限等待
-        poller._executor.shutdown(wait=True)
+        logger.info("收到退出信号, 立即停止...")
+        poller._executor.shutdown(wait=False)
         logger.info("Auto-Review Poller 已停止")
 
 
