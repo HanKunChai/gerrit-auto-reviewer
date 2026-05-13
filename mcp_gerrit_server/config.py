@@ -74,7 +74,7 @@ class AutoReviewConfig:
         self.poll_interval = data.get("poll_interval", 120)
         self.reviewer = data.get("reviewer", "code-reviewer")
         self.query = data.get("query", "reviewer:code-reviewer+status:open")
-        self.max_changes_per_poll = data.get("max_changes_per_poll", 10)
+        self.max_changes_per_poll = data.get("max_changes_per_poll", 50)
         self.use_rules_engine = data.get("use_rules_engine", False)
         self.max_concurrent_reviews = data.get("max_concurrent_reviews", 2)
         self.claude_timeout = data.get("claude_timeout", 1800)

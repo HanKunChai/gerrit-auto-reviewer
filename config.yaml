@@ -13,7 +13,7 @@ auto_review:
   poll_interval: 600
   reviewer: "code-reviewer"
   query: "reviewer:code-reviewer+status:open"
-  max_changes_per_poll: 10
+  max_changes_per_poll: 50
   use_rules_engine: false
   max_concurrent_reviews: 2
   claude_timeout: 1800

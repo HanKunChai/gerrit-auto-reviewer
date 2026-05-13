@@ -218,9 +218,11 @@ class AutoReviewPoller:
             logger.info("[Mock] 查询变更...")
             changes = self._mock_changes()
         else:
-            logger.info("查询变更: %s", ar.query)
+            # Append tag exclusion so Gerrit filters already-reviewed changes
+            query = f"{ar.query}+-tag:{self.REVIEW_TAG}"
+            logger.info("查询变更: %s", query)
             changes = self._client.list_changes(
-                query=ar.query,
+                query=query,
                 limit=ar.max_changes_per_poll,
             )
 
