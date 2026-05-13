@@ -65,7 +65,7 @@ class GerritConfig:
 class DimensionConfig:
     def __init__(self, data: dict):
         self.name = data.get("name", "")
-        self.skills = data.get("skills", [])
+        self.folder = data.get("folder", "")
 
 
 class AutoReviewConfig:

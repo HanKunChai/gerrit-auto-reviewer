@@ -22,28 +22,15 @@ auto_review:
   max_concurrent_claude: 4
   dimensions:
     - name: "问题解决评估"
-      skills:
-        - "problem-solving"
+      folder: "problem-solving"
     - name: "安全"
-      skills:
-        - "buffer-overflow"
-        - "injection"
-        - "unsafe-functions"
+      folder: "security"
     - name: "内存管理"
-      skills:
-        - "leak-detection"
-        - "use-after-free"
-        - "null-pointer"
+      folder: "memory"
     - name: "编码规范"
-      skills:
-        - "brace-style"
-        - "line-limit"
-        - "variable-style"
+      folder: "coding-style"
     - name: "逻辑正确性"
-      skills:
-        - "bounds-check"
-        - "return-value"
-        - "loop-termination"
+      folder: "logic"
 
 repo:
   local_path: "./local-repo"
