@@ -36,7 +36,7 @@ PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_DIR)
 
 # 评审系统版本号 — 变更后已评审的变更会被重新评审
-REVIEWER_VERSION = "v5"
+REVIEWER_VERSION = "v6"
 
 from mcp_gerrit_server.config import load_config
 from mcp_gerrit_server.gerrit_client import GerritClient
@@ -986,7 +986,7 @@ class AutoReviewPoller:
                 lines.append("")
 
         lines.append("----------")
-        lines.append("(Gerrit Auto-Review v5)")
+        lines.append("(Gerrit Auto-Review v6)")
         return "\n".join(lines)
 
     # ---- Mock 支持 ----
