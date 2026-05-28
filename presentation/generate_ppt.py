@@ -9,11 +9,9 @@ import os
 
 # ── Color palette ──────────────────────────────────────────────────────────
 BG_DARK = RGBColor(0x1A, 0x1A, 0x2E)
-BG_CARD = RGBColor(0x22, 0x22, 0x3A)
 ACCENT_BLUE = RGBColor(0x4E, 0xC9, 0xF0)
 ACCENT_GREEN = RGBColor(0x2E, 0xCC, 0x71)
 ACCENT_ORANGE = RGBColor(0xF3, 0x9C, 0x12)
-ACCENT_RED = RGBColor(0xE7, 0x4C, 0x3C)
 WHITE = RGBColor(0xFF, 0xFF, 0xFF)
 LIGHT_GRAY = RGBColor(0xBB, 0xBB, 0xCC)
 DIM_GRAY = RGBColor(0x88, 0x88, 0x99)
@@ -44,20 +42,14 @@ def add_title_box(slide, text, top=Inches(0.3), height=Inches(0.7),
 
 def add_body_text(slide, lines, top=Inches(1.2), left=Inches(0.8),
                   width=Inches(8.4), font_size=Pt(16), line_spacing=1.5,
-                  bullet=True, font_name="Microsoft YaHei"):
-    """Add bullet-point body text to the slide."""
+                  font_name="Microsoft YaHei"):
+    """Add body text to the slide."""
     txBox = slide.shapes.add_textbox(left, top, width, Inches(5.5))
     tf = txBox.text_frame
     tf.word_wrap = True
     for i, line in enumerate(lines):
-        if i == 0:
-            p = tf.paragraphs[0]
-        else:
-            p = tf.add_paragraph()
-        if bullet and not line.startswith("  "):
-            p.text = line
-        else:
-            p.text = line
+        p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
+        p.text = line
         p.font.size = font_size
         p.font.color.rgb = WHITE
         p.font.name = font_name
@@ -118,38 +110,6 @@ def add_highlight_box(slide, text, top, left=Inches(0.8),
     p.font.color.rgb = color
     p.font.bold = True
     p.font.name = "Microsoft YaHei"
-    return shape
-
-
-def add_stat_card(slide, value, label, left, top,
-                  width=Inches(2.2), height=Inches(1.5),
-                  value_color=ACCENT_BLUE):
-    """Add a stat card with big number and label."""
-    shape = slide.shapes.add_shape(
-        MSO_SHAPE.ROUNDED_RECTANGLE, left, top, width, height
-    )
-    shape.fill.solid()
-    shape.fill.fore_color.rgb = BG_CARD
-    shape.line.fill.background()
-
-    tf = shape.text_frame
-    tf.word_wrap = True
-    tf.paragraphs[0].alignment = PP_ALIGN.CENTER
-    # Value
-    p = tf.paragraphs[0]
-    p.text = value
-    p.font.size = Pt(32)
-    p.font.color.rgb = value_color
-    p.font.bold = True
-    p.font.name = "Consolas"
-    p.space_after = Pt(4)
-    # Label
-    p2 = tf.add_paragraph()
-    p2.alignment = PP_ALIGN.CENTER
-    p2.text = label
-    p2.font.size = Pt(12)
-    p2.font.color.rgb = LIGHT_GRAY
-    p2.font.name = "Microsoft YaHei"
     return shape
 
 
