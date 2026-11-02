@@ -34,29 +34,29 @@ mkdir -p logs
 # 检测模式
 if [ "$1" = "--poller" ] || [ "$1" = "--poller-once" ]; then
     # ---- 自动轮询评审模式 ----
-    POLLER_ARGS=""
+    POLLER_ARGS=()
     if [ "$1" = "--poller-once" ]; then
-        POLLER_ARGS="$POLLER_ARGS --once"
+        POLLER_ARGS+=("--once")
     fi
     shift
 
     while [ $# -gt 0 ]; do
         case "$1" in
-            --once)          POLLER_ARGS="$POLLER_ARGS --once" ;;
-            --mock)          POLLER_ARGS="$POLLER_ARGS --mock" ;;
-            --verbose|-v)    POLLER_ARGS="$POLLER_ARGS --verbose" ;;
-            --config)        POLLER_ARGS="$POLLER_ARGS --config $2"; shift ;;
-            --interval)      POLLER_ARGS="$POLLER_ARGS --interval $2"; shift ;;
-            --url)           POLLER_ARGS="$POLLER_ARGS --url \"$2\""; shift ;;
-            --svn-user)      POLLER_ARGS="$POLLER_ARGS --svn-user \"$2\""; shift ;;
-            --svn-password)  POLLER_ARGS="$POLLER_ARGS --svn-password \"$2\""; shift ;;
+            --once)          POLLER_ARGS+=("--once") ;;
+            --mock)          POLLER_ARGS+=("--mock") ;;
+            --verbose|-v)    POLLER_ARGS+=("--verbose") ;;
+            --config)        POLLER_ARGS+=("--config" "$2"); shift ;;
+            --interval)      POLLER_ARGS+=("--interval" "$2"); shift ;;
+            --url)           POLLER_ARGS+=("--url" "$2"); shift ;;
+            --svn-user)      POLLER_ARGS+=("--svn-user" "$2"); shift ;;
+            --svn-password)  echo "出于安全考虑，SVN 密码请通过环境变量 SVN_PASSWORD 传递" >&2; exit 1 ;;
             *)               echo "未知参数: $1"; exit 1 ;;
         esac
         shift
     done
 
     echo "Starting Gerrit Auto-Review Poller..." >&2
-    exec python3 scripts/auto_review_poller.py $POLLER_ARGS
+    exec python3 scripts/auto_review_poller.py "${POLLER_ARGS[@]}"
 
 else
     # ---- MCP 服务模式 (默认) ----

@@ -57,6 +57,8 @@ os.makedirs(_real_archive_cache_dir, exist_ok=True)
 # SVN凭据（通过命令行参数或环境变量设置）
 _svn_username: Optional[str] = None
 _svn_password: Optional[str] = None
+# SVN 归档表根路径（由 config.yaml 的 svn.archive_base 覆盖）
+_svn_archive_base: str = "svn://svn.example.com:3690/repo/archive"
 
 
 def _get_svn_revision(svn_path: str, username: str, password: str) -> Optional[str]:
@@ -286,9 +288,9 @@ def _check_realm_problem_archive(svn_path: str, commit_msg: str) -> tuple:
         year = match.group(1)  # 2026
         month = match.group(2)  # 202604
 
-        # 构造领域问题修改表的SVN路径
+        # 构造领域问题修改表的SVN路径 (根路径由 config.yaml 的 svn.archive_base 配置)
         table_path = (
-            f"svn://svn.example.com:3690/repo/archive/{year}/{month}/"
+            f"{_svn_archive_base.rstrip('/')}/{year}/{month}/"
             f"领域问题修改表.xls"
         )
 
@@ -390,9 +392,9 @@ def _check_requirement_archive(svn_path: str, commit_msg: str) -> tuple:
         year = match.group(1)
         month = match.group(2)
 
-        # 构造产品需求表的SVN路径
+        # 构造产品需求表的SVN路径 (根路径由 config.yaml 的 svn.archive_base 配置)
         table_path = (
-            f"svn://svn.example.com:3690/repo/archive/{year}/{month}/"
+            f"{_svn_archive_base.rstrip('/')}/{year}/{month}/"
             f"产品需求表.xls"
         )
 
@@ -823,186 +825,190 @@ class AutoReviewPoller:
             worktree_dir = repo.create_worktree(sha, change_number, rev_num)
             repo_dir = worktree_dir
 
-        logger.info("  diff: %d 行, %d 个文件", len(diff_text.splitlines()), len(files))
-        for status, fpath in files:
-            logger.info("    [%s] %s", status, fpath)
-
-        if not diff_text.strip():
-            logger.warning("  变更无 diff 内容，跳过")
-            return
-
-        # 将 diff 写入临时文件，Claude 通过 cat 读取（避免注入 prompt 撑爆上下文）
+        # finally 中会用到, 必须在第一个 return 之前初始化
         diff_file = None
-        if not self.mock and repo_dir and diff_text:
-            diff_file = os.path.join(repo_dir, "_review_diff.txt")
-            try:
-                with open(diff_file, "w", encoding="utf-8") as f:
-                    f.write(diff_text)
-            except OSError:
-                diff_file = None
+        try:
+            logger.info("  diff: %d 行, %d 个文件", len(diff_text.splitlines()), len(files))
+            for status, fpath in files:
+                logger.info("    [%s] %s", status, fpath)
 
-        material_check_result = ""
-        material_issues = []
+            if not diff_text.strip():
+                logger.warning("  变更无 diff 内容，跳过")
+                return
 
-        # SVN 提交材料检查（仅在启用时）
-        if getattr(self.config, "svn", None) and self.config.svn.enabled:
-            # 1.5 检查提交材料是否齐全（报告相关路径中的三个必需文档）
-            logger.info("  [1.5] 检查提交材料完整性...")
-            svn_path = _parse_svn_path(commit_msg)
-            if svn_path:
-                is_complete, msg, missing = _check_commit_material(svn_path)
-                if is_complete:
-                    logger.info("  提交材料检查通过: %s", msg)
-                    material_check_result = f"✓ 提交材料齐全"
-                else:
-                    logger.warning("  提交材料检查未通过: %s", msg)
-                    material_check_result = f"⚠ {msg}"
-                    material_issues = [{"file": "commit-material-check", "line": 0, "severity": "warning", "message": msg}]
-            else:
-                logger.warning("  未找到报告相关路径")
-                material_check_result = "⚠ 未在提交日志中找到报告相关路径"
-                material_issues = [{"file": "commit-material-check", "line": 0, "severity": "warning", "message": "未找到报告相关路径"}]
+            # 将 diff 写入临时文件，Claude 通过 cat 读取（避免注入 prompt 撑爆上下文）
+            if not self.mock and repo_dir and diff_text:
+                diff_file = os.path.join(repo_dir, "_review_diff.txt")
+                try:
+                    with open(diff_file, "w", encoding="utf-8") as f:
+                        f.write(diff_text)
+                except OSError:
+                    diff_file = None
 
-            # 1.6 检查领域问题修改表归档情况
-            if self.config.svn.check_realm_archive and svn_path and "领域问题修改源" in svn_path:
-                logger.info("  [1.6] 检查领域问题修改表归档...")
-                is_archived, archive_msg = _check_realm_problem_archive(svn_path, commit_msg)
-                if is_archived:
-                    logger.info("  领域问题修改表: %s", archive_msg)
-                    material_check_result += f"\n{archive_msg}"
-                else:
-                    logger.warning("  领域问题修改表: %s", archive_msg)
-                    material_check_result += f"\n{archive_msg}"
-                    material_issues.append({"file": "realm-problem-archive-check", "line": 0, "severity": "warning", "message": archive_msg})
+            material_check_result = ""
+            material_issues = []
 
-            # 1.7 检查需求源归档情况
-            if self.config.svn.check_requirement_archive and svn_path and "需求源" in svn_path:
-                logger.info("  [1.7] 检查产品需求表归档...")
-                is_archived, archive_msg = _check_requirement_archive(svn_path, commit_msg)
-                if is_archived:
-                    logger.info("  产品需求表: %s", archive_msg)
-                    material_check_result += f"\n{archive_msg}"
-                else:
-                    logger.warning("  产品需求表: %s", archive_msg)
-                    material_check_result += f"\n{archive_msg}"
-                    material_issues.append({"file": "requirement-archive-check", "line": 0, "severity": "warning", "message": archive_msg})
+            # SVN 提交材料检查（仅在启用时）
+            if getattr(self.config, "svn", None) and self.config.svn.enabled:
+                svn_path = _parse_svn_path(commit_msg)
+                # 1.5 检查提交材料是否齐全（报告相关路径中的三个必需文档）
+                if self.config.svn.check_commit_material:
+                    logger.info("  [1.5] 检查提交材料完整性...")
+                    if svn_path:
+                        is_complete, msg, missing = _check_commit_material(svn_path)
+                        if is_complete:
+                            logger.info("  提交材料检查通过: %s", msg)
+                            material_check_result = f"✓ 提交材料齐全"
+                        else:
+                            logger.warning("  提交材料检查未通过: %s", msg)
+                            material_check_result = f"⚠ {msg}"
+                            material_issues = [{"file": "commit-material-check", "line": 0, "severity": "warning", "message": msg}]
+                    else:
+                        logger.warning("  未找到报告相关路径")
+                        material_check_result = "⚠ 未在提交日志中找到报告相关路径"
+                        material_issues = [{"file": "commit-material-check", "line": 0, "severity": "warning", "message": "未找到报告相关路径"}]
 
-        # 2. 运行本地规则引擎（仅在启用时）
-        if self.config.auto_review.use_rules_engine:
-            logger.info("  [2/4] 运行规则引擎...")
-            issues = self._engine.run(diff_text)
-            logger.info(
-                "  发现 %d 个问题: %d errors, %d warnings, %d info",
-                len(issues),
-                sum(1 for i in issues if i.severity == "error"),
-                sum(1 for i in issues if i.severity == "warning"),
-                sum(1 for i in issues if i.severity == "info"),
-            )
-            for issue in issues[:20]:
+                # 1.6 检查领域问题修改表归档情况
+                if self.config.svn.check_realm_archive and svn_path and "领域问题修改源" in svn_path:
+                    logger.info("  [1.6] 检查领域问题修改表归档...")
+                    is_archived, archive_msg = _check_realm_problem_archive(svn_path, commit_msg)
+                    if is_archived:
+                        logger.info("  领域问题修改表: %s", archive_msg)
+                        material_check_result = (material_check_result + "\n" if material_check_result else "") + archive_msg
+                    else:
+                        logger.warning("  领域问题修改表: %s", archive_msg)
+                        material_check_result = (material_check_result + "\n" if material_check_result else "") + archive_msg
+                        material_issues.append({"file": "realm-problem-archive-check", "line": 0, "severity": "warning", "message": archive_msg})
+
+                # 1.7 检查需求源归档情况
+                if self.config.svn.check_requirement_archive and svn_path and "需求源" in svn_path:
+                    logger.info("  [1.7] 检查产品需求表归档...")
+                    is_archived, archive_msg = _check_requirement_archive(svn_path, commit_msg)
+                    if is_archived:
+                        logger.info("  产品需求表: %s", archive_msg)
+                        material_check_result = (material_check_result + "\n" if material_check_result else "") + archive_msg
+                    else:
+                        logger.warning("  产品需求表: %s", archive_msg)
+                        material_check_result = (material_check_result + "\n" if material_check_result else "") + archive_msg
+                        material_issues.append({"file": "requirement-archive-check", "line": 0, "severity": "warning", "message": archive_msg})
+
+            # 2. 运行本地规则引擎（仅在启用时）
+            if self.config.auto_review.use_rules_engine:
+                logger.info("  [2/4] 运行规则引擎...")
+                issues = self._engine.run(diff_text)
                 logger.info(
-                    "    [%s] %s:%d %s",
-                    issue.severity.upper(), issue.file, issue.line, issue.message,
+                    "  发现 %d 个问题: %d errors, %d warnings, %d info",
+                    len(issues),
+                    sum(1 for i in issues if i.severity == "error"),
+                    sum(1 for i in issues if i.severity == "warning"),
+                    sum(1 for i in issues if i.severity == "info"),
                 )
-        else:
-            issues = []
-
-        # 3. Metis / Claude Code AI 评审
-        changed_files = [f for _, f in files]
-        ar = self.config.auto_review
-
-        if ar.use_metis and self._metis_reviewer is not None:
-            if ar.metis.review_mode == "native":
-                logger.info("  [3/4] Metis 原生安全审查 (变更文件 %d 个)...",
-                            len([f for _, f in files if f]))
-                result = self._metis_reviewer.review_native(
-                    change_id, repo_dir, files, commit_msg,
-                )
-                if not result:
-                    logger.error("  Metis 评审失败，跳过上报 (变更: %s)", change_id)
-                    return
-                dimension_results = {"Metis 安全审查": result}
-                logger.info("  Metis 评审: %d 个发现",
-                            len(result.get("issues", [])))
+                for issue in issues[:20]:
+                    logger.info(
+                        "    [%s] %s:%d %s",
+                        issue.severity.upper(), issue.file, issue.line, issue.message,
+                    )
             else:
-                logger.info("  [3/4] Metis 多维度并行评审 (%d 维度)...", len(ar.dimensions))
-                dimension_results = self._metis_reviewer.review_dimensions(
+                issues = []
+
+            # 3. Metis / Claude Code AI 评审
+            changed_files = [f for _, f in files]
+            ar = self.config.auto_review
+
+            if ar.use_metis and self._metis_reviewer is not None:
+                if ar.metis.review_mode == "native":
+                    logger.info("  [3/4] Metis 原生安全审查 (变更文件 %d 个)...",
+                                len([f for _, f in files if f]))
+                    result = self._metis_reviewer.review_native(
+                        change_id, repo_dir, files, commit_msg,
+                    )
+                    if not result:
+                        logger.error("  Metis 评审失败，跳过上报 (变更: %s)", change_id)
+                        return
+                    dimension_results = {"Metis 安全审查": result}
+                    logger.info("  Metis 评审: %d 个发现",
+                                len(result.get("issues", [])))
+                else:
+                    logger.info("  [3/4] Metis 多维度并行评审 (%d 维度)...", len(ar.dimensions))
+                    dimension_results = self._metis_reviewer.review_dimensions(
+                        change_id, commit_msg, repo_dir, base_branch, files, sha,
+                        ar.dimensions,
+                    )
+                    valid = {k: v for k, v in dimension_results.items() if v}
+                    if not valid:
+                        logger.error("  所有维度 Metis 评审均失败，跳过上报 (变更: %s)", change_id)
+                        return
+                    logger.info("  Metis 评审: %d/%d 维度完成", len(valid), len(ar.dimensions))
+                    for dn, dr in dimension_results.items():
+                        status = "OK" if dr else "FAIL"
+                        logger.info("    [%s] %s", status, dn)
+            elif ar.use_multi_dimension and ar.dimensions:
+                logger.info("  [3/4] 多维度并行评审 (%d 维度)...", len(ar.dimensions))
+                dimension_results = self._invoke_claude_dimensions(
                     change_id, commit_msg, repo_dir, base_branch, files, sha,
-                    ar.dimensions,
                 )
                 valid = {k: v for k, v in dimension_results.items() if v}
                 if not valid:
-                    logger.error("  所有维度 Metis 评审均失败，跳过上报 (变更: %s)", change_id)
+                    logger.error("  所有维度 Claude 评审均失败，跳过上报 (变更: %s)", change_id)
                     return
-                logger.info("  Metis 评审: %d/%d 维度完成", len(valid), len(ar.dimensions))
+                logger.info("  Claude 评审: %d/%d 维度完成", len(valid), len(ar.dimensions))
                 for dn, dr in dimension_results.items():
                     status = "OK" if dr else "FAIL"
-                    logger.info("    [%s] %s", status, dn)
-        elif ar.use_multi_dimension and ar.dimensions:
-            logger.info("  [3/4] 多维度并行评审 (%d 维度)...", len(ar.dimensions))
-            dimension_results = self._invoke_claude_dimensions(
-                change_id, commit_msg, repo_dir, base_branch, files, sha,
-            )
-            valid = {k: v for k, v in dimension_results.items() if v}
-            if not valid:
-                logger.error("  所有维度 Claude 评审均失败，跳过上报 (变更: %s)", change_id)
-                return
-            logger.info("  Claude 评审: %d/%d 维度完成", len(valid), len(ar.dimensions))
-            for dn, dr in dimension_results.items():
-                status = "OK" if dr else "FAIL"
-                logger.info("    [%s] %s (%d 字符)", status, dn, len(dr or ""))
-        else:
-            logger.info("  [3/4] Claude Code 评审...")
-            claude_review = self._invoke_claude(
-                change_id, commit_msg, repo_dir, base_branch, changed_files, sha,
-                files_with_status=files,
-            )
-            if claude_review:
-                logger.info("  Claude 评审: %d 字符", len(claude_review))
+                    logger.info("    [%s] %s (%d 字符)", status, dn, len(dr or ""))
             else:
-                logger.error("  Claude Code 评审失败，跳过上报 (变更: %s)", change_id)
-                return
-            dimension_results = {"Claude Code 评审": claude_review}
+                logger.info("  [3/4] Claude Code 评审...")
+                claude_review = self._invoke_claude(
+                    change_id, commit_msg, repo_dir, base_branch, changed_files, sha,
+                    files_with_status=files,
+                )
+                if claude_review:
+                    logger.info("  Claude 评审: %d 字符", len(claude_review))
+                else:
+                    logger.error("  Claude Code 评审失败，跳过上报 (变更: %s)", change_id)
+                    return
+                dimension_results = {"Claude Code 评审": claude_review}
 
-        # 4. 构造评审消息
-        logger.info("  [4/4] 构造评审意见...")
-        message = self._build_review_message(
-            change_id, subject, issues, dimension_results,
-            material_check=material_check_result,
-        )
-        logger.info("  评审意见: %d 字符", len(message))
-
-        # 5. 提交评审
-        if not self.mock:
-            result = self._client.post_review(
-                change_id, rev_id,
-                message=message,
-                score=0,
-                tag=self.REVIEW_TAG,
+            # 4. 构造评审消息
+            logger.info("  [4/4] 构造评审意见...")
+            message = self._build_review_message(
+                change_id, subject, issues, dimension_results,
+                material_check=material_check_result,
             )
-            logger.info("  评审已提交")
-        else:
-            logger.info("  [Mock] 评审已提交")
+            logger.info("  评审意见: %d 字符", len(message))
 
-        # 清理临时 diff 文件
-        if diff_file:
-            try:
-                os.remove(diff_file)
-            except OSError:
-                pass
+            # 5. 提交评审
+            if not self.mock:
+                result = self._client.post_review(
+                    change_id, rev_id,
+                    message=message,
+                    score=0,
+                    tag=self.REVIEW_TAG,
+                )
+                logger.info("  评审已提交")
+            else:
+                logger.info("  [Mock] 评审已提交")
 
-        # 清理 worktree
-        if worktree_dir and repo:
-            try:
-                repo.remove_worktree(worktree_dir)
-            except Exception:
-                pass
+        finally:
+            # 清理临时 diff 文件
+            if diff_file:
+                try:
+                    os.remove(diff_file)
+                except OSError:
+                    pass
 
-        # 清理本次 fetch 创建的 review ref，避免长期堆积
-        if not self.mock and repo:
-            try:
-                repo.cleanup_review_ref(change_number, rev_num)
-            except Exception:
-                pass
+            # 清理 worktree
+            if worktree_dir and repo:
+                try:
+                    repo.remove_worktree(worktree_dir)
+                except Exception:
+                    pass
+
+            # 清理本次 fetch 创建的 review ref，避免长期堆积
+            if not self.mock and repo:
+                try:
+                    repo.cleanup_review_ref(change_number, rev_num)
+                except Exception:
+                    pass
 
         logger.info("  [OK] 评审完成")
 
@@ -1691,10 +1697,12 @@ def main():
     poller = AutoReviewPoller(mock=args.mock, config_path=args.config, target_url=args.url)
 
     # 收集SVN凭据（CLI参数 > 环境变量 > config.yaml）
-    global _svn_username, _svn_password
+    global _svn_username, _svn_password, _svn_archive_base
     if poller.config.svn.enabled:
         _svn_username = args.svn_user or os.environ.get("SVN_USER") or poller.config.svn.username
         _svn_password = args.svn_password or os.environ.get("SVN_PASSWORD") or poller.config.svn.password
+        if poller.config.svn.archive_base:
+            _svn_archive_base = poller.config.svn.archive_base
         if _svn_username:
             logger.info("SVN集成已启用 (username=%s)", _svn_username)
     else:

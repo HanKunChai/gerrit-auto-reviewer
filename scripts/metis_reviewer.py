@@ -110,13 +110,17 @@ class MetisReviewer:
         """
         target_files = self._changed_files(files_with_status)
         if not target_files:
-            return None
+            # 变更只删除文件: 没有可审查代码, 视为无问题 (而不是失败重试)
+            return {"issues": []}
         prompt_path = self._build_native_prompt_file(commit_msg, files_with_status)
         try:
-            findings = self._review_files(
+            findings, succeeded = self._review_files(
                 change_id, repo_dir, target_files,
                 prompt_path=prompt_path, dimension="native",
             )
+            if succeeded == 0:
+                # 所有 Metis 调用都失败: 返回 None, 供调用方跳过上报并等下一轮重试
+                return None
             if not findings:
                 return {"issues": []}
             return {"issues": self._to_issues(findings)}
@@ -145,20 +149,26 @@ class MetisReviewer:
         def _run(dim):
             target_files = self._changed_files(files_with_status)
             if not target_files:
+                # 变更只删除文件: 没有可审查代码, 视为无问题
                 with lock:
-                    results[dim.name] = None
+                    results[dim.name] = {"issues": []}
                 return
             prompt_path = self._build_dimension_prompt_file(
                 dim, problem, solution, files_with_status,
             )
-            findings = self._review_files(
-                change_id, repo_dir, target_files,
-                prompt_path=prompt_path, dimension=dim.name,
-            )
+            try:
+                findings, succeeded = self._review_files(
+                    change_id, repo_dir, target_files,
+                    prompt_path=prompt_path, dimension=dim.name,
+                )
+            finally:
+                if os.path.exists(prompt_path):
+                    os.remove(prompt_path)
             with lock:
-                results[dim.name] = self._convert_findings(findings, dim.name)
-            if os.path.exists(prompt_path):
-                os.remove(prompt_path)
+                results[dim.name] = (
+                    self._convert_findings(findings, dim.name)
+                    if succeeded > 0 else None
+                )
 
         with ThreadPoolExecutor(max_workers=len(dimensions) or 1) as executor:
             futures = [executor.submit(_run, d) for d in dimensions]
@@ -178,7 +188,9 @@ class MetisReviewer:
         for status, fpath in files_with_status or []:
             if status == "D":
                 continue
-            p = str(fpath).replace("\\", "/").lstrip("./")
+            p = str(fpath).replace("\\", "/")
+            if p.startswith("./"):
+                p = p[2:]
             if p:
                 target.append(p)
         return target
@@ -204,13 +216,15 @@ class MetisReviewer:
         *,
         prompt_path: str,
         dimension: str,
-    ) -> list:
-        """对一组文件运行 Metis 审查, 返回扁平化 findings 列表。
+    ) -> tuple:
+        """对一组文件运行 Metis 审查, 返回 (findings 列表, 成功调用次数)。
 
         findings: [{file, line, severity, cwe, issue, reasoning, mitigation}]
-        任一文件失败返回空列表 (该维度整体失败语义由调用方处理)。
+        ``succeeded == 0`` 表示整组调用均失败, 调用方应视为该维度失败,
+        而不是"无问题"。
         """
         all_findings = []
+        succeeded = 0
         groups = self._group_by_dir(target_files)
         for group in groups:
             # review_file/review_dir 按 CWD 解析路径, 统一传绝对路径
@@ -234,10 +248,16 @@ class MetisReviewer:
                 with open(out_path, encoding="utf-8") as f:
                     payload = json.load(f)
                 all_findings.extend(self._flatten_review(payload))
+                succeeded += 1
             except (OSError, json.JSONDecodeError) as e:
                 logger.warning("[%s] 解析 Metis 输出失败: %s", dimension, e)
                 continue
-        return all_findings
+        if succeeded and succeeded < len(groups):
+            logger.warning(
+                "[%s] 部分 Metis 调用失败 (%d/%d 成功), 结果可能不完整",
+                dimension, succeeded, len(groups),
+            )
+        return all_findings, succeeded
 
     def _invoke_metis(
         self,

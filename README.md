@@ -246,6 +246,7 @@ repo:
 
 svn:
   enabled: false              # 启用 SVN 提交材料合规检查
+  archive_base: "svn://your-svn-host/repo/archive"  # 归档表根路径
   check_commit_material: true # 检查设计文档/checklist/自测报告
   check_realm_archive: true   # 检查问题归档表
   check_requirement_archive: true  # 检查需求归档表
@@ -269,12 +270,12 @@ A: 技能库与具体团队的内网编码规范相关，未包含在公开镜�
 
 **Q: 如何诊断 Gerrit 认证问题？**  
 ```bash
-python scripts/diagnose_auth.py --verbose
+python scripts/diagnose_auth.py
 ```
 
 **Q: 如何只评审某个特定变更？**  
 ```bash
-python scripts/auto_review.py --change <change_id>
+python scripts/auto_review.py --change-id <change_id>
 # 或
 python scripts/auto_review_poller.py --url "<gerrit change URL>"
 ```
@@ -288,6 +289,6 @@ python scripts/auto_review_poller.py --url "<gerrit change URL>"
 
 - 规则引擎仅支持 C 语言；如需其他语言，需添加对应规则文件和提示词模板
 - 评审分数固定为 `0`（不自动给 +1/+2 或 -1/-2）
-- 依赖 AI 后端本地安装及登录/部署状态
-- SVN 合规检查依赖内部文档模板（设计文档、checklist、自测报告、归档表），需按团队流程调整
+- 依赖 AI 后端本地安装及登录/部署状态；AI 调用全部失败时跳过上报，等下一轮重试
+- SVN 合规检查依赖内部文档模板（设计文档、checklist、自测报告、归档表），需按团队流程调整 `svn.archive_base` 与文档名
 - `--dangerously-skip-permissions` 标志适用于内网受控环境，公网部署需评估风险

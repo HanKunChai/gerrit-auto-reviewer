@@ -163,6 +163,7 @@ class SvnConfig:
         self.enabled = data.get("enabled", False)
         self.username = data.get("username", "")
         self.password = data.get("password", "")
+        self.archive_base = data.get("archive_base", "")
         self.check_commit_material = data.get("check_commit_material", True)
         self.check_realm_archive = data.get("check_realm_archive", True)
         self.check_requirement_archive = data.get("check_requirement_archive", True)

@@ -21,8 +21,9 @@ auto_review:
   dimension_timeout: 1800
   max_concurrent_claude: 4
   reviewer_version: "v6"
-  # Metis 内网 LLM 审查器 (替代 Claude Code; 内网禁止使用 claude agent 时开启)
-  use_metis: true
+  # Metis 内网 LLM 审查器 (替代 Claude Code)
+  # false = 默认使用 Claude Code CLI; 内网禁止使用 claude agent 时改为 true
+  use_metis: false
   metis:
     # 内网 Metis 部署包路径 (metis-intranet/venv): Windows 为 Scripts\metis.exe, Linux 为 venv/bin/metis
     executable: "<metis-intranet>/venv/Scripts/metis.exe"
@@ -89,9 +90,12 @@ cache:
   ttl_hours: 24
 
 svn:
-  enabled: true
-  username: ""
-  password: ""
+  # 提交材料/归档合规检查, 按团队内部流程启用
+  enabled: false
+  username: ""        # 建议改用环境变量 SVN_USER
+  password: ""        # 建议改用环境变量 SVN_PASSWORD
+  # 归档表根路径 (<root>/{year}/{month}/领域问题修改表.xls 等)
+  archive_base: "svn://your-svn-host/repo/archive"
   check_commit_material: true
   check_realm_archive: true
   check_requirement_archive: true
