@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GERA — Gerrit Auto-Review 系统详细设计方案 v6</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --border: #30363d;
+    --text: #c9d1d9;
+    --dim: #8b949e;
+    --accent: #58a6ff;
+    --green: #3fb950;
+    --orange: #d2991d;
+    --red: #f85149;
+    --code-bg: #1c2128;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    line-height: 1.7; padding: 2rem;
+    max-width: 960px; margin: 0 auto;
+  }
+  h1 { font-size: 2rem; border-bottom: 1px solid var(--border); padding-bottom: 0.5rem; margin-bottom: 0.5rem; }
+  h2 { font-size: 1.5rem; margin-top: 2.5rem; margin-bottom: 1rem; padding-bottom: 0.3rem; border-bottom: 1px solid var(--border); }
+  h3 { font-size: 1.15rem; margin-top: 1.5rem; margin-bottom: 0.5rem; color: var(--accent); }
+  h4 { font-size: 1rem; margin-top: 1rem; margin-bottom: 0.3rem; color: var(--dim); }
+  p, li { margin-bottom: 0.4rem; }
+  a { color: var(--accent); text-decoration: none; }
+  code {
+    background: var(--code-bg); padding: 0.15em 0.4em; border-radius: 4px;
+    font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; font-size: 0.9em;
+  }
+  pre {
+    background: var(--code-bg); padding: 1rem; border-radius: 6px;
+    overflow-x: auto; border: 1px solid var(--border);
+    font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; font-size: 0.85em;
+    line-height: 1.5; margin-bottom: 1rem;
+  }
+  pre code { background: none; padding: 0; }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; }
+  th, td { padding: 0.6rem 0.8rem; text-align: left; border-bottom: 1px solid var(--border); }
+  th { background: var(--surface); font-weight: 600; color: var(--dim); font-size: 0.85rem; text-transform: uppercase; }
+  td code { font-size: 0.85em; }
+  blockquote {
+    border-left: 3px solid var(--accent); padding: 0.5rem 1rem; margin: 1rem 0;
+    background: var(--surface); border-radius: 0 4px 4px 0; color: var(--dim);
+  }
+  .ver { color: var(--dim); font-size: 0.9rem; }
+  .tag { display: inline-block; padding: 0.1em 0.5em; border-radius: 3px; font-size: 0.8em; font-weight: 600; }
+  .tag-ok { background: #1b3a1b; color: var(--green); }
+  .tag-warn { background: #3a2e1b; color: var(--orange); }
+  .tag-err { background: #3a1b1b; color: var(--red); }
+  .diagram {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    padding: 1rem; margin: 1rem 0; overflow-x: auto; white-space: pre;
+    font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+    font-size: 0.8em; line-height: 1.3;
+  }
+  .arch-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 0.8rem;
+    margin: 1rem 0;
+  }
+  .arch-card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    padding: 1rem;
+  }
+  .arch-card h4 { margin-top: 0; color: var(--accent); }
+  .arch-card p { color: var(--dim); font-size: 0.9rem; margin: 0; }
+  .flow-line { color: var(--dim); font-family: monospace; font-size: 0.82em; }
+  .dim-list { columns: 2; }
+  @media (max-width: 640px) { .dim-list { columns: 1; } }
+  .footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--border); color: var(--dim); font-size: 0.85rem; }
+  ul { padding-left: 1.5rem; }
+  ol { padding-left: 1.5rem; }
+  .highlight { color: var(--accent); font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>GERA — Gerrit Auto-Review 系统详细设计方案</h1>
+<p class="ver">版本: v6 &middot; 2026-05-13</p>
+
+<!-- ============================================================ -->
+<h2>1. 系统概述</h2>
+
+<p>GERA (Gerrit Auto-Review) 是一个面向内网 Gerrit 代码评审平台的自动化代码审查系统。系统持续轮询变更，为每个变更创建独立 <code>git worktree</code>，并行启动 <span class="highlight">5 个维度专用 Claude Code 进程</span>。Skill 通过 <code>CLAUDE.md</code> 原生加载（非 prompt 嵌入），prompt 仅 ~400B，上下文释放给代码审查。</p>
+
+<h3>1.1 设计目标</h3>
+<table>
+<tr><th>目标</th><th>说明</th></tr>
+<tr><td>自动化</td><td>零人工干预，持续轮询 Gerrit 待处理变更并自动提交评审意见</td></tr>
+<tr><td>多维度并行</td><td>5 个 Claude 进程并行评审安全/内存/编码/逻辑/问题评估</td></tr>
+<tr><td>Skill 文件夹化</td><td>5 个维度文件夹，递归加载所有 <code>.md</code>，新增 skill 只需放文件</td></tr>
+<tr><td>Skill 原生加载</td><td><code>CLAUDE.md</code> 引用 &rarr; Claude Code 自动发现，不占 prompt 上下文</td></tr>
+<tr><td>并发安全</td><td>Semaphore 限流 + 命名 ref + worktree 隔离 + lock 保护</td></tr>
+<tr><td>内网兼容</td><td>纯 Python 3.8+，Flask + PyYAML + requests 三依赖</td></tr>
+<tr><td>幂等</td><td><code>REVIEW_TAG</code> + query <code>-tag</code> 双重过滤，v6 版本标记</td></tr>
+</table>
+
+<h3>1.2 约束</h3>
+<table>
+<tr><th>约束</th><th>值</th></tr>
+<tr><td>Python 版本</td><td>&ge; 3.8（目标环境 3.8.10）</td></tr>
+<tr><td>第三方依赖</td><td>flask, pyyaml, requests（仅三包）</td></tr>
+<tr><td>AI 评审</td><td>Claude Code CLI，内网部署</td></tr>
+<tr><td>目标代码</td><td>嵌入式 C 语言（skill 可扩展）</td></tr>
+<tr><td>并发模型</td><td>ThreadPoolExecutor(2) review &times; ThreadPoolExecutor(5) dimension &times; Semaphore(4) Claude</td></tr>
+<tr><td>评审隔离</td><td><code>git worktree</code> detached at <code>local-repo/_review/{id}/{rev}/</code></td></tr>
+<tr><td>输出</td><td><code>--output-format json</code> + <code>_extract_review_json</code> 三层提取</td></tr>
+<tr><td>评审失败处理</td><td>超时 / 异常 / returncode&ne;0 / 空输出 &rarr; 跳过提交</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>2. 系统架构</h2>
+
+<div class="diagram">
+&#x250C;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x252C;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2510;
+&#x2502;                  Gerrit REST API                  &#x2502;
+&#x2514;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2534;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2518;
+          &#x2502; HTTP Basic Auth
+  &#x250C;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2534;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2510;
+  &#x2502;                            &#x2502;
+  &#x25BC;  Poller (&#x8F6E;&#x8BE2;&#x8C03;&#x5EA6;)   &#x25BC;  LocalRepo         &#x25BC;  MCP Server
+  &#x2502;                            &#x2502;  shallow clone     &#x2502;  (server.py)
+  &#x2502;                            &#x2502;  + worktree &#x521B;&#x5EFA;   &#x2502;
+  &#x2514;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2518;
+          &#x2502;
+          &#x25BC;
+  &#x250C;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2510;
+  &#x2502;  _review_change() &#x2014; &#x5355;&#x6B21;&#x8BC4;&#x5BA1;&#x751F;&#x547D;&#x5468;&#x671F;                         &#x2502;
+  &#x2502;                                                        &#x2502;
+  &#x2502;  1. fetch diff + &#x521B;&#x5EFA; worktree                            &#x2502;
+  &#x2502;  2. [&#x53EF;&#x9009;] &#x89C4;&#x5219;&#x5F15;&#x64CE;                                        &#x2502;
+  &#x2502;  3. _invoke_claude_dimensions() &#x2014; 5 &#x7EF4;&#x5EA6;&#x5E76;&#x884C;         &#x2502;
+  &#x2502;     &#x251C; [&#x95EE;&#x9898;&#x89E3;&#x51B3;&#x8BC4;&#x4F30;] problem-solving                   &#x2502;
+  &#x2502;     &#x251C; [&#x5B89;&#x5168;] buffer-overflow + injection + ...        &#x2502;
+  &#x2502;     &#x251C; [&#x5185;&#x5B58;&#x7BA1;&#x7406;] leak-detection + use-after-free + ... &#x2502;
+  &#x2502;     &#x251C; [&#x7F16;&#x7801;&#x89C4;&#x8303;] brace-style + line-limit + ...     &#x2502;
+  &#x2502;     &#x2514; [&#x903B;&#x8F91;&#x6B63;&#x786E;&#x6027;] bounds-check + return-value + ... &#x2502;
+  &#x2502;  4. _build_review_message() &#x2192; &#x6309;&#x7EF4;&#x5EA6;&#x5206;&#x7AE0;&#x8282;               &#x2502;
+  &#x2502;  5. GerritClient.post_review()                          &#x2502;
+  &#x2502;  6. &#x6E05;&#x7406;: diff &#x6587;&#x4EF6; &#x2192; worktree &#x2192; review ref           &#x2502;
+  &#x2514;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2518;
+</div>
+
+<h3>2.1 组件清单</h3>
+<div class="arch-grid">
+  <div class="arch-card"><h4>Poller</h4><p><code>scripts/auto_review_poller.py</code><br>轮询 &rarr; 调度 &rarr; 多维度评审 &rarr; 提交</p></div>
+  <div class="arch-card"><h4>MCP Server</h4><p><code>mcp_gerrit_server/server.py</code><br>MCP 服务，供外部客户端调用</p></div>
+  <div class="arch-card"><h4>Gerrit Client</h4><p><code>mcp_gerrit_server/gerrit_client.py</code><br>Gerrit REST API（Basic Auth）</p></div>
+  <div class="arch-card"><h4>Local Repo</h4><p><code>mcp_gerrit_server/local_repo.py</code><br>git clone + fetch + worktree + diff</p></div>
+  <div class="arch-card"><h4>Config</h4><p><code>mcp_gerrit_server/config.py</code><br>YAML 配置 + DimensionConfig</p></div>
+  <div class="arch-card"><h4>Skills</h4><p><code>.claude/skills/</code><br>13 个维度专用评审 skill（5 文件夹）</p></div>
+  <div class="arch-card"><h4>Rules Engine</h4><p><code>review_rules/engine.py</code><br>diff 解析 + 正则匹配（可选）</p></div>
+  <div class="arch-card"><h4>Cache</h4><p><code>mcp_gerrit_server/cache.py</code><br>评审缓存（TTL 24h）</p></div>
+</div>
+
+<!-- ============================================================ -->
+<h2>3. 数据流详解</h2>
+
+<h3>3.1 单次评审流程</h3>
+
+<pre><code>poll_and_submit()
+  &#x251C; Gerrit GET /changes/?q=reviewer:xxx+status:open+-tag:autogenerated:...:v6
+  &#x251C; &#x8FC7;&#x6EE4;: &#x81EA;&#x5DF1;&#x7684;&#x63D0;&#x4EA4; / _in_flight / _already_reviewed
+  &#x2514; self._executor.submit(_review_task)
+       &#x2514; _review_change()
+            &#x2502;
+            &#x251C; [1] LocalRepo.ensure_branch(base)
+            &#x251C; [1] LocalRepo.fetch_change() &#x2192; refs/review/{id}/{rev} &#x2192; SHA
+            &#x251C; [1] LocalRepo.get_diff(base, SHA, context_lines=3)
+            &#x251C; [1] LocalRepo.create_worktree(SHA) &#x2192; worktree &#x76EE;&#x5F55;
+            &#x2502;      &#x2514; local-repo/_review/{change_id}/{rev_num}/
+            &#x251C; [1] &#x5199;&#x5165; _review_diff.txt &#x5230; worktree
+            &#x2502;
+            &#x251C; [2] ReviewEngine.run(diff) &#x2192; issues&#xFF08;&#x53EF;&#x9009;&#xFF0C;&#x9ED8;&#x8BA4;&#x5173;&#x95ED;&#xFF09;
+            &#x2502;
+            &#x251C; [3] _invoke_claude_dimensions()
+            &#x2502;    &#x251C; _ensure_skill_files() &#x2192; copytree &#x7EF4;&#x5EA6;&#x6587;&#x4EF6;&#x5939;&#x5230; worktree
+            &#x2502;    &#x251C; _generate_claude_md() &#x2192; worktree &#x6839; CLAUDE.md &#x5F15;&#x7528; skills
+            &#x2502;    &#x251C; ThreadPoolExecutor(5) &#x5E76;&#x884C;:
+            &#x2502;    &#x2502;   &#x251C; _build_dimension_prompt() (~400B, &#x4E0D;&#x542B; skill body)
+            &#x2502;    &#x2502;   &#x2502;    &#x251C; "&#x8BF7;&#x4F7F;&#x7528; CLAUDE.md &#x4E2D;&#x52A0;&#x8F7D;&#x7684; skills &#x8FDB;&#x884C;&#x8BC4;&#x5BA1;"
+            &#x2502;    &#x2502;   &#x2502;    &#x251C; _build_status_table() &#x2192; &#x6587;&#x4EF6;&#x53D8;&#x66F4;&#x6E05;&#x5355;
+            &#x2502;    &#x2502;   &#x2502;    &#x251C; needs_context &#x68C0;&#x6D4B; &#x2192; &#x8FFD;&#x52A0;&#x4E0A;&#x4E0B;&#x6587;&#x6307;&#x4EE4;
+            &#x2502;    &#x2502;   &#x2502;    &#x2514; JSON schema&#xFF08;verdict &#x6216; issues&#xFF09;
+            &#x2502;    &#x2502;   &#x2514; _invoke_claude(prompt, dimension=dim.name)
+            &#x2502;    &#x2502;        &#x251C; Semaphore.acquire()
+            &#x2502;    &#x2502;        &#x251C; claude -p "..." --output-format json --dangerously-skip-permissions
+            &#x2502;    &#x2502;        &#x251C; timeout / rc&#x2260;0 / &#x7A7A;&#x8F93;&#x51FA; &#x2192; return None
+            &#x2502;    &#x2502;        &#x2514; Semaphore.release()
+            &#x2502;    &#x2514; _extract_review_json() &#x4E09;&#x5C42;&#x63D0;&#x53D6;
+            &#x2502;
+            &#x251C; [4] _build_review_message(dimension_results)
+            &#x2502;    &#x251C; _format_verdict() / _format_issues()
+            &#x2502;    &#x2514; &#x6309;&#x7EF4;&#x5EA6;&#x5206;&#x7AE0;&#x8282;&#x7EAF;&#x6587;&#x672C;
+            &#x2502;
+            &#x251C; [5] GerritClient.post_review(message, score=0, tag=v6)
+            &#x2502;
+            &#x2514; &#x6E05;&#x7406;: os.remove(_review_diff.txt)
+                     repo.remove_worktree()
+                     repo.cleanup_review_ref()</code></pre>
+
+<h3>3.2 Git 操作并发安全</h3>
+<table>
+<tr><th>问题</th><th>方案</th></tr>
+<tr>
+  <td>多线程共享 <code>FETCH_HEAD</code> 被覆盖</td>
+  <td><code>git fetch gerrit refs/changes/*:refs/review/{id}/{rev}</code> &rarr; 返回稳定 SHA</td>
+</tr>
+<tr>
+  <td>多线程共享 working tree 读到旧版本</td>
+  <td><code>create_worktree(SHA)</code> &rarr; detached worktree 独立文件系统视图</td>
+</tr>
+<tr>
+  <td>多线程共用 git config 中的密码 URL</td>
+  <td><code>_sanitize_url()</code> 日志脱敏，<code>gerrit_push_url</code> 使用 bare URL</td>
+</tr>
+</table>
+
+<h3>3.3 失败处理</h3>
+<table>
+<tr><th>路径</th><th>行为</th></tr>
+<tr><td><code>_invoke_claude</code> 返回 <code>None</code></td><td>claude 未找到 / TimeoutExpired / rc&ne;0 / stdout 为空</td></tr>
+<tr><td>多维度路径</td><td>任一维度失败 &rarr; "评审未完成"；全部失败 &rarr; 跳过 Gerrit 提交</td></tr>
+<tr><td>单维度路径</td><td>失败 &rarr; 跳过 Gerrit 提交</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>4. Skill 系统</h2>
+
+<h3>4.1 目录结构</h3>
+
+<pre><code>.claude/skills/
+  security/           &#x2190; &#x5B89;&#x5168;&#x7EF4;&#x5EA6;
+    buffer-overflow.md
+    injection.md
+    unsafe-functions.md
+  coding-style/       &#x2190; &#x7F16;&#x7801;&#x89C4;&#x8303;&#x7EF4;&#x5EA6;
+    brace-style.md
+    line-limit.md
+    variable-style.md
+  memory/             &#x2190; &#x5185;&#x5B58;&#x7BA1;&#x7406;&#x7EF4;&#x5EA6;
+    leak-detection.md
+    use-after-free.md
+    null-pointer.md
+  logic/              &#x2190; &#x903B;&#x8F91;&#x6B63;&#x786E;&#x6027;&#x7EF4;&#x5EA6;
+    bounds-check.md
+    return-value.md
+    loop-termination.md
+  problem-solving/    &#x2190; &#x95EE;&#x9898;&#x89E3;&#x51B3;&#x8BC4;&#x4F30;&#x7EF4;&#x5EA6;
+    problem-solving.md</code></pre>
+
+<h3>4.2 加载机制</h3>
+<ul>
+  <li><code>_build_skill_registry()</code> 递归扫描 <code>skills/{folder}/**/*.md</code></li>
+  <li><code>_ensure_skill_files()</code> 用 <code>shutil.copytree</code> 复制整个文件夹到 worktree</li>
+  <li><code>_generate_claude_md()</code> 在 worktree 根生成 <code>CLAUDE.md</code> 引用所有 skill</li>
+  <li>Prompt 仅 ~400B：<code>&#x8BF7;&#x4F7F;&#x7528; CLAUDE.md &#x4E2D;&#x52A0;&#x8F7D;&#x7684; skills &#x8FDB;&#x884C;&#x8BC4;&#x5BA1;</code></li>
+  <li>Skill body 不再嵌入 prompt，上下文释放 ~30KB</li>
+</ul>
+
+<h3>4.3 13 个 Skill</h3>
+<table>
+<tr><th>&#x6587;&#x4EF6;&#x5939;</th><th>&#x5305;&#x542B; Skill</th><th style="text-align:center">needs_context</th></tr>
+<tr><td>problem-solving</td><td>problem-solving</td><td style="text-align:center"><span class="tag tag-ok">&#x2713;</span></td></tr>
+<tr><td>security</td><td>buffer-overflow, injection, unsafe-functions</td><td style="text-align:center"></td></tr>
+<tr><td>memory</td><td>leak-detection, use-after-free, null-pointer</td><td style="text-align:center"><span class="tag tag-ok">&#x2713;</span></td></tr>
+<tr><td>coding-style</td><td>brace-style, line-limit, variable-style</td><td style="text-align:center"></td></tr>
+<tr><td>logic</td><td>bounds-check, return-value, loop-termination</td><td style="text-align:center"><span class="tag tag-ok">&#x2713;</span></td></tr>
+</table>
+
+<blockquote><code>needs_context: true</code> &rarr; prompt &#x8FFD;&#x52A0; <em>"发现潜在问题时必须 cat 源文件阅读完整函数上下文后再下结论"</em></blockquote>
+
+<h3>4.4 扩展机制</h3>
+<ul>
+  <li><strong>新增 skill：</strong>丢 <code>.md</code> 文件到对应文件夹 &rarr; 自动被加载，无需改配置</li>
+  <li><strong>新增维度：</strong>加文件夹 + <code>config.yaml</code> 加一行 <code>{name, folder}</code></li>
+</ul>
+
+<!-- ============================================================ -->
+<h2>5. 配置</h2>
+
+<pre><code>auto_review:
+  poll_interval: 600               # &#x8F6E;&#x8BE2;&#x95F4;&#x9694;&#xFF08;&#x79D2;&#xFF09;
+  reviewer: "code-reviewer"        # Gerrit reviewer &#x7528;&#x6237;&#x540D;
+  query: "reviewer:code-reviewer+status:open"  # &#x81EA;&#x52A8;&#x8FFD;&#x52A0; -tag:{REVIEW_TAG}
+  max_changes_per_poll: 50         # &#x6BCF;&#x8F6E;&#x6700;&#x5927;&#x53D8;&#x66F4;&#x6570;
+  use_rules_engine: false
+  max_concurrent_reviews: 2        # review &#x4EFB;&#x52A1;&#x7EBF;&#x7A0B;&#x6C60;
+  max_concurrent_claude: 4         # Claude &#x5B50;&#x8FDB;&#x7A0B; Semaphore
+  claude_timeout: 1800             # &#x5355;&#x7EF4;&#x5EA6;&#x8D85;&#x65F6;&#xFF08;&#x79D2;&#xFF09;
+  use_multi_dimension: true
+  dimension_timeout: 1800          # &#x591A;&#x7EF4;&#x5EA6;&#x8D85;&#x65F6;&#xFF08;&#x79D2;&#xFF09;
+  dimensions:                      # &#x7EF4;&#x5EA6;&#x5B9A;&#x4E49;&#xFF0C;&#x6BCF;&#x4E2A;&#x7EF4;&#x5EA6;&#x4E00;&#x4E2A;&#x6587;&#x4EF6;&#x5939;
+    - name: "&#x95EE;&#x9898;&#x89E3;&#x51B3;&#x8BC4;&#x4F30;"
+      folder: "problem-solving"
+    - name: "&#x5B89;&#x5168;"
+      folder: "security"
+    - name: "&#x5185;&#x5B58;&#x7BA1;&#x7406;"
+      folder: "memory"
+    - name: "&#x7F16;&#x7801;&#x89C4;&#x8303;"
+      folder: "coding-style"
+    - name: "&#x903B;&#x8F91;&#x6B63;&#x786E;&#x6027;"
+      folder: "logic"</code></pre>
+
+<!-- ============================================================ -->
+<h2>6. 并发模型</h2>
+
+<pre><code>self._executor (ThreadPoolExecutor, max_workers=2)
+  &#x2502;
+  &#x251C; _review_task &#x2192; _review_change
+  &#x2502;    &#x2514; _invoke_claude_dimensions
+  &#x2502;         &#x2514; ThreadPoolExecutor(max_workers=5)
+  &#x2502;              &#x251C; _run(&#x5B89;&#x5168;)       &#x2524;
+  &#x2502;              &#x251C; _run(&#x7F16;&#x7801;&#x89C4;&#x8303;)   &#x2502;
+  &#x2502;              &#x251C; _run(&#x5185;&#x5B58;&#x7BA1;&#x7406;)   &#x251C; 5 &#x4E2A; _invoke_claude
+  &#x2502;              &#x251C; _run(&#x903B;&#x8F91;)      &#x2502;   Semaphore(4) &#x9650;&#x6D41;
+  &#x2502;              &#x2514; _run(&#x95EE;&#x9898;&#x8BC4;&#x4F30;)   &#x2524;
+  &#x2502;
+  &#x2514; _review_task (&#x7B2C;2&#x4E2A;review)
+       &#x2514; ...&#x540C;&#x4E0A;...</code></pre>
+
+<table>
+<tr><th>&#x5C42;&#x7EA7;</th><th>&#x9650;&#x5236;</th><th>&#x673A;&#x5236;</th></tr>
+<tr><td>Review &#x4EFB;&#x52A1;</td><td>2</td><td><code>self._executor(max_workers=2)</code></td></tr>
+<tr><td>&#x7EF4;&#x5EA6;&#x4EFB;&#x52A1;</td><td>5</td><td><code>ThreadPoolExecutor(5)</code></td></tr>
+<tr><td>Claude &#x5B50;&#x8FDB;&#x7A0B;</td><td>4</td><td><code>threading.Semaphore(4)</code></td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>7. 评审消息格式</h2>
+
+<pre><code>========== &#x81EA;&#x52A8;&#x4EE3;&#x7801;&#x8BC4;&#x5BA1;&#x7ED3;&#x679C; ==========
+
+&#x53D8;&#x66F4;: Iabc1234
+&#x6807;&#x9898;: Fix buffer overflow
+
+--- &#x95EE;&#x9898;&#x89E3;&#x51B3;&#x8BC4;&#x4F30; ---
+[&#x5DF2;&#x89E3;&#x51B3;] snprintf &#x66FF;&#x4EE3; sprintf &#x4FEE;&#x590D;&#x4E86;&#x7F13;&#x51B2;&#x533A;&#x6EA2;&#x51FA;
+
+--- &#x5B89;&#x5168; ---
+src/config.c:15 [error] snprintf &#x672A;&#x68C0;&#x67E5;&#x8FD4;&#x56DE;&#x503C;
+
+--- &#x5185;&#x5B58;&#x7BA1;&#x7406; ---
+&#x65E0;&#x95EE;&#x9898;&#x3002;
+
+--- &#x7F16;&#x7801;&#x89C4;&#x8303; ---
+src/config.c:19 [warning] &#x884C;&#x8D85;&#x8FC7;200&#x5B57;&#x7B26;
+
+--- &#x903B;&#x8F91;&#x6B63;&#x786E;&#x6027; ---
+src/config.c:42 [warning] config_key &#x4F20;&#x5165;&#x524D;&#x672A;&#x6821;&#x9A8C; NULL
+
+----------
+(Gerrit Auto-Review v6)</code></pre>
+
+<!-- ============================================================ -->
+<h2>8. 安全约束</h2>
+
+<table>
+<tr><th>&#x7EA6;&#x675F;</th><th>&#x5B9E;&#x73B0;</th></tr>
+<tr><td>&#x5BC6;&#x7801;&#x4E0D;&#x6CC4;&#x9732;&#x5230;&#x65E5;&#x5FD7;</td><td><code>_sanitize_url()</code> &#x8131;&#x654F; 3 &#x5904;&#x65E5;&#x5FD7;&#x70B9;</td></tr>
+<tr><td>&#x5E76;&#x53D1;&#x9694;&#x79BB;</td><td>&#x547D;&#x540D; ref + worktree + Semaphore</td></tr>
+<tr><td>&#x8BC4;&#x5BA1;&#x5931;&#x8D25;&#x4E0D;&#x6CC4;&#x9732;</td><td>&#x5931;&#x8D25; &rarr; &#x53EA;&#x5199;&#x65E5;&#x5FD7;&#xFF0C;&#x4E0D;&#x63D0;&#x4EA4; Gerrit</td></tr>
+<tr><td>&#x51ED;&#x8BC1;&#x5B89;&#x5168;</td><td>&#x5BC6;&#x7801;&#x4ECE; .env / &#x73AF;&#x5883;&#x53D8;&#x91CF;&#x8BFB;&#x53D6;</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>9. 已知限制</h2>
+
+<table>
+<tr><th>&#x9650;&#x5236;</th><th>&#x8BF4;&#x660E;</th></tr>
+<tr><td>&#x4EC5; C &#x8BED;&#x8A00;</td><td>skill &#x548C; rules &#x5747;&#x9488;&#x5BF9;&#x5D4C;&#x5165;&#x5F0F; C</td></tr>
+<tr><td>&#x65E0;&#x81EA;&#x52A8;&#x8BC4;&#x5206;</td><td><code>score=0</code>&#xFF0C;&#x4E0D;&#x6839;&#x636E;&#x95EE;&#x9898;&#x4E25;&#x91CD;&#x5EA6;&#x81EA;&#x52A8;&#x8C03;&#x6574;</td></tr>
+<tr><td>worktree &#x78C1;&#x76D8;&#x5360;&#x7528;</td><td>&#x6BCF;&#x4E2A; change &#x4E00;&#x4EFD;&#x5B8C;&#x6574;&#x6E90;&#x7801;&#xFF08;&#x8BC4;&#x5BA1;&#x5B8C;&#x5373;&#x6E05;&#x7406;&#xFF0C;&#x542F;&#x52A8;&#x65F6;&#x626B;&#x63CF;&#x5B64;&#x513F;&#x6E05;&#x7406;&#xFF09;</td></tr>
+</table>
+
+<div class="footer">
+  <p>GERA &mdash; Gerrit Auto-Review v6 &middot; 2026-05-13</p>
+</div>
+
+</body>
+</html>
