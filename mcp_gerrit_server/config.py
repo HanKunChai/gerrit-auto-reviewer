@@ -44,6 +44,7 @@ class Config:
         self.review = ReviewConfig(data.get("review", {}))
         self.rules = RulesConfig(data.get("rules", {}))
         self.cache = CacheConfig(data.get("cache", {}))
+        self.svn = SvnConfig(data.get("svn", {}))
 
     @property
     def is_mock(self) -> bool:
@@ -68,6 +69,25 @@ class DimensionConfig:
         self.folder = data.get("folder", "")
 
 
+class MetisConfig:
+    """Metis 内网 LLM 审查器配置 (替代 Claude Code)。
+
+    review_mode:
+      native      - 原生模式: 每个变更一次 Metis 审查 (覆盖安全/内存/逻辑类漏洞,
+                    推荐用于 C/C++ Gerrit 评审; Metis 自带多维度安全审查)
+      dimensions  - 维度模式: 按 config.auto_review.dimensions 并行逐维度审查
+                    (仅对非 C/C++ 语言的 simple_llm_review 路径生效)
+    """
+
+    def __init__(self, data: dict):
+        self.executable = data.get("executable", "")
+        self.config = data.get("config", "")
+        self.tiktoken_cache_dir = data.get("tiktoken_cache_dir", "")
+        self.timeout = data.get("timeout", 1800)
+        self.max_concurrent = data.get("max_concurrent", 4)
+        self.review_mode = data.get("review_mode", "native")
+
+
 class AutoReviewConfig:
     def __init__(self, data: dict):
         self.enabled = data.get("enabled", True)
@@ -81,6 +101,9 @@ class AutoReviewConfig:
         self.use_multi_dimension = data.get("use_multi_dimension", True)
         self.dimension_timeout = data.get("dimension_timeout", 1800)
         self.max_concurrent_claude = data.get("max_concurrent_claude", 4)
+        self.reviewer_version = data.get("reviewer_version", "v6")
+        self.use_metis = data.get("use_metis", False)
+        self.metis = MetisConfig(data.get("metis", {}))
         self.dimensions = [
             DimensionConfig(d) for d in data.get("dimensions", [])
         ]
@@ -133,6 +156,16 @@ class CacheConfig:
         self.dir = data.get("dir", "./.cache/review-cache")
         self.max_size_mb = data.get("max_size_mb", 500)
         self.ttl_hours = data.get("ttl_hours", 24)
+
+
+class SvnConfig:
+    def __init__(self, data: dict):
+        self.enabled = data.get("enabled", False)
+        self.username = data.get("username", "")
+        self.password = data.get("password", "")
+        self.check_commit_material = data.get("check_commit_material", True)
+        self.check_realm_archive = data.get("check_realm_archive", True)
+        self.check_requirement_archive = data.get("check_requirement_archive", True)
 
 
 def load_config(path: Optional[str] = None) -> Config:

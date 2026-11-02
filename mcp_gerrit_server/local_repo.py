@@ -534,6 +534,15 @@ class LocalRepo:
                 )
             except Exception:
                 pass
+        # Clean up orphaned worktree config if git registration exists but directory is missing
+        worktree_config_dir = self.repo_path / ".git" / "worktrees" / revision
+        if worktree_config_dir.exists() and not wt_dir.exists():
+            import shutil
+            try:
+                shutil.rmtree(worktree_config_dir)
+                logger.info("cleaned orphaned worktree config: %s", worktree_config_dir)
+            except Exception as e:
+                logger.warning("failed to clean orphaned worktree config: %s", e)
         logger.info("creating worktree at %s (sha=%s)", wt_dir, sha[:8])
         self._run_git(
             ["worktree", "add", "--detach", str(wt_dir), sha],

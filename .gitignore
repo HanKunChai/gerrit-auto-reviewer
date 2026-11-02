@@ -5,6 +5,7 @@ local-repo/
 test-data/
 reviews/
 logs/
+scripts/.archive_cache/
 offline-packages/
 .claude/
 .omc/

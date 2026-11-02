@@ -24,6 +24,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -35,15 +36,110 @@ from urllib.parse import quote
 PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_DIR)
 
-# 评审系统版本号 — 变更后已评审的变更会被重新评审
-REVIEWER_VERSION = "v6"
-
 from mcp_gerrit_server.config import load_config
-from mcp_gerrit_server.gerrit_client import GerritClient
+from mcp_gerrit_server.gerrit_client import GerritClient, parse_gerrit_response
 from mcp_gerrit_server.local_repo import LocalRepo
 from review_rules.engine import ReviewEngine
 
+# Metis 适配器 (scripts 目录加入 sys.path)
+_SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+from metis_reviewer import MetisReviewer
+
 logger = logging.getLogger("auto-review-poller")
+
+# 领域问题修改表缓存: {month: {"file_path": str, "j_column_values": list, "download_time": float}}
+_real_archive_cache: dict = {}
+_real_archive_cache_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".archive_cache")
+os.makedirs(_real_archive_cache_dir, exist_ok=True)
+
+# SVN凭据（通过命令行参数或环境变量设置）
+_svn_username: Optional[str] = None
+_svn_password: Optional[str] = None
+
+
+def _get_svn_revision(svn_path: str, username: str, password: str) -> Optional[str]:
+    """获取SVN路径的最新修订版本号"""
+    try:
+        cmd = ["svn", "info", "--non-interactive", "--username", username, "--password", password, svn_path]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, encoding='utf-8', errors='replace')
+        if result.returncode != 0:
+            cmd = ["svn", "info", "--non-interactive", svn_path]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, encoding='utf-8', errors='replace')
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                if line.startswith("Revision:"):
+                    return line.split(":")[1].strip()
+        else:
+            logger.warning("SVN info 失败 (rc=%d): %s", result.returncode, svn_path)
+    except subprocess.TimeoutExpired:
+        logger.warning("SVN info 超时: %s", svn_path)
+    except Exception as e:
+        logger.warning("SVN info 异常 %s: %s", e, svn_path)
+    return None
+
+
+def _download_realm_archive_table(month: str, table_path: str, username: str, password: str) -> Optional[tuple]:
+    """下载领域问题修改表，返回(j列值列表, 下载时间)或None"""
+    temp_dir = tempfile.mkdtemp()
+    try:
+        cmd = ["svn", "export", "--non-interactive", "--username", username, "--password", password, table_path, temp_dir]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120, encoding='utf-8', errors='replace')
+        if result.returncode != 0:
+            cmd = ["svn", "export", "--non-interactive", table_path, temp_dir]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120, encoding='utf-8', errors='replace')
+        if result.returncode != 0:
+            logger.warning("无法导出领域问题修改表: %s", result.stderr)
+            return None
+
+        xls_files = [f for f in os.listdir(temp_dir) if f.endswith(('.xls', '.xlsx'))]
+        if not xls_files:
+            return None
+
+        xls_path = os.path.join(temp_dir, xls_files[0])
+        import xlrd
+
+        workbook = xlrd.open_workbook(xls_path)
+        sheet = workbook.sheet_by_index(0)
+
+        j_column_values = []
+        for row_idx in range(sheet.nrows):
+            try:
+                cell_value = sheet.cell_value(row_idx, 9)
+                if cell_value:
+                    j_column_values.append(str(cell_value))
+            except:
+                continue
+
+        # 缓存到本地文件
+        cache_file = os.path.join(_real_archive_cache_dir, f"realm_archive_{month}.txt")
+        with open(cache_file, 'w', encoding='utf-8') as f:
+            f.write(str(int(time.time())) + "\n")
+            for val in j_column_values:
+                f.write(val + "\n")
+
+        return (j_column_values, time.time())
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def _load_cached_archive_table(month: str) -> Optional[tuple]:
+    """从本地缓存加载领域问题修改表"""
+    cache_file = os.path.join(_real_archive_cache_dir, f"realm_archive_{month}.txt")
+    if not os.path.exists(cache_file):
+        return None
+
+    try:
+        with open(cache_file, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+            if len(lines) < 2:
+                return None
+            download_time = float(lines[0].strip())
+            j_column_values = [line.strip() for line in lines[1:] if line.strip()]
+            return (j_column_values, download_time)
+    except Exception:
+        return None
 
 
 def _parse_commit_msg(msg: str) -> tuple:
@@ -84,15 +180,329 @@ def _parse_commit_msg(msg: str) -> tuple:
     return (problem or "(无)", solution or "(无)")
 
 
+def _parse_svn_path(msg: str) -> Optional[str]:
+    """从 commit message 中提取 SVN 路径。
+
+    搜索整个commit message中第一个以svn://开头的路径，
+    可能出现在"报告相关路径"、"需求/问题归档"等字段中。
+    支持中文路径的匹配。
+    """
+    if not msg:
+        return None
+    # 匹配svn://开头到行尾的所有内容（支持中文路径和空格）
+    match = re.search(r'(svn://[^\n]+)', msg, re.IGNORECASE)
+    if match:
+        return match.group(1)
+    return None
+
+
+def _check_commit_material(svn_path: str) -> tuple:
+    """检查 SVN 路径下是否包含必需的三个文档。
+
+    返回: (is_complete: bool, message: str, missing_docs: list)
+    """
+    if not svn_path:
+        return (False, "未找到报告相关路径", ["报告相关路径为空"])
+
+    # SVN 认证信息
+    svn_username = _svn_username or ""
+    svn_password = _svn_password or ""
+
+    try:
+        # 使用 svn list 获取文件列表
+        cmd = [
+            "svn", "list", "--non-interactive", "--username", svn_username, "--password", svn_password,
+            svn_path
+        ]
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=60,
+            encoding='utf-8', errors='replace'
+        )
+
+        if result.returncode != 0:
+            # SVN 命令失败，尝试不带认证的匿名访问
+            cmd = ["svn", "list", "--non-interactive", svn_path]
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=60,
+                encoding='utf-8', errors='replace'
+            )
+            if result.returncode != 0:
+                return (False, f"SVN路径无法访问: {svn_path}", ["SVN访问失败"])
+
+        file_list = result.stdout
+        logger.debug("SVN路径 %s 文件列表:\n%s", svn_path, file_list)
+
+        # 检查必需的三个文档
+        required_docs = {
+            "方案设计": False,  # 方案设计文档
+            "checklist": False,  # checklist 自检表
+            "自测报告": False,  # 自测报告文档
+        }
+
+        for line in file_list.splitlines():
+            line_lower = line.lower()
+            if "方案" in line and "设计" in line:
+                required_docs["方案设计"] = True
+            elif "checklist" in line_lower or "自检表" in line:
+                required_docs["checklist"] = True
+            elif "自测报告" in line:
+                required_docs["自测报告"] = True
+
+        missing = [k for k, v in required_docs.items() if not v]
+        if missing:
+            return (False, f"缺少提交材料: {', '.join(missing)}", missing)
+        else:
+            return (True, "提交材料齐全", [])
+
+    except subprocess.TimeoutExpired:
+        return (False, "SVN查询超时", ["SVN访问超时"])
+    except Exception as e:
+        logger.warning("检查提交材料失败: %s", e)
+        return (False, f"检查提交材料失败: {str(e)}", ["检查失败"])
+
+
+def _check_realm_problem_archive(svn_path: str, commit_msg: str) -> tuple:
+    """检查领域问题修改源是否已归档到领域问题修改表。
+
+    当"报告相关路径"包含"/领域问题修改源"时，需要检查该提交是否记录在
+    对应月份的"领域问题修改表.xls"中。支持缓存机制，检查是否为最新版本。
+
+    返回: (is_archived: bool, message: str)
+    """
+    if not svn_path or "领域问题修改源" not in svn_path:
+        return (True, "")  # 不需要检查
+
+    # SVN 认证信息
+    svn_username = _svn_username or ""
+    svn_password = _svn_password or ""
+
+    try:
+        # 从SVN路径中提取年份和月份
+        # 路径格式: .../2026/202604/领域问题修改源/... 或 .../2026/202605/领域问题修改源/...
+        match = re.search(r'/(\d{4})/(\d{4,6})/', svn_path)
+        if not match:
+            return (False, "无法从报告相关路径中提取年份月份")
+
+        year = match.group(1)  # 2026
+        month = match.group(2)  # 202604
+
+        # 构造领域问题修改表的SVN路径
+        table_path = (
+            f"svn://svn.example.com:3690/repo/archive/{year}/{month}/"
+            f"领域问题修改表.xls"
+        )
+
+        # 获取SVN最新修订版本号
+        table_dir = os.path.dirname(table_path)
+        current_revision = _get_svn_revision(table_dir, svn_username, svn_password)
+
+        # 检查缓存是否有效
+        cache_file = os.path.join(_real_archive_cache_dir, f"realm_archive_{month}.txt")
+        cache_rev_file = os.path.join(_real_archive_cache_dir, f"realm_archive_{month}.rev")
+
+        cached_data = _load_cached_archive_table(month)
+        need_download = True
+        is_cache_valid = False
+
+        if cached_data:
+            # 检查SVN版本是否变化
+            if current_revision and os.path.exists(cache_rev_file):
+                try:
+                    with open(cache_rev_file, 'r') as f:
+                        cached_rev = f.read().strip()
+                    if cached_rev == current_revision:
+                        is_cache_valid = True
+                        need_download = False
+                        logger.info("领域问题修改表缓存有效(Revision: %s)", current_revision)
+                except Exception:
+                    pass
+
+        if need_download:
+            logger.info("下载领域问题修改表: %s (当前SVN Revision: %s)", table_path, current_revision)
+            result = _download_realm_archive_table(month, table_path, svn_username, svn_password)
+            if not result:
+                return (False, f"无法读取领域问题修改表: {month}")
+
+            # 保存SVN版本号
+            if current_revision:
+                with open(cache_rev_file, 'w') as f:
+                    f.write(current_revision)
+
+            j_column_values, _ = result
+        else:
+            j_column_values, _ = cached_data
+
+        # 从commit message中提取"功能说明/问题现象"或"功能说明"
+        report_name = ""
+        for line in commit_msg.splitlines():
+            line = line.strip()
+            m = re.match(r'^(功能说明/问题现象|功能说明|问题现象)[:：]\s*(.*)', line, re.IGNORECASE)
+            if m:
+                report_name = m.group(2).strip()
+                break
+
+        if not report_name:
+            return (False, "无法从提交中提取报告名称")
+
+        logger.info("待检查报告名称: %s", report_name)
+
+        # 检查J列中是否包含报告名称
+        found = False
+        for cell_value in j_column_values:
+            if report_name in cell_value or cell_value in report_name:
+                found = True
+                break
+
+        if found:
+            return (True, f"✓ 已归档到领域问题修改表({month})")
+        else:
+            return (False, f"⚠ 该笔提交尚未归档到领域问题修改表({month})")
+
+    except subprocess.TimeoutExpired:
+        return (False, "领域问题修改表查询超时")
+    except Exception as e:
+        logger.warning("检查领域问题修改表失败: %s", e)
+        return (False, f"检查领域问题修改表失败: {str(e)}")
+
+
+def _check_requirement_archive(svn_path: str, commit_msg: str) -> tuple:
+    """检查需求源是否已归档到产品需求表。
+
+    当"报告相关路径"包含"/需求源"时，需要检查该提交是否记录在
+    对应月份的"产品需求表.xls"中。
+
+    返回: (is_archived: bool, message: str)
+    """
+    if not svn_path or "需求源" not in svn_path:
+        return (True, "")  # 不需要检查
+
+    # SVN 认证信息
+    svn_username = _svn_username or ""
+    svn_password = _svn_password or ""
+
+    try:
+        # 从SVN路径中提取年份和月份
+        # 路径格式: .../2026/202604/需求源/... 或 .../2027/202705/需求源/...
+        match = re.search(r'/(\d{4})/(\d{4,6})/', svn_path)
+        if not match:
+            return (False, "无法从报告相关路径中提取年份月份")
+
+        year = match.group(1)
+        month = match.group(2)
+
+        # 构造产品需求表的SVN路径
+        table_path = (
+            f"svn://svn.example.com:3690/repo/archive/{year}/{month}/"
+            f"产品需求表.xls"
+        )
+
+        logger.info("检查产品需求表: %s", table_path)
+
+        # 创建临时目录下载表格
+        import tempfile
+        import shutil
+
+        temp_dir = tempfile.mkdtemp()
+        try:
+            # 使用svn导出表格文件
+            cmd = [
+                "svn", "export", "--non-interactive", "--username", svn_username, "--password", svn_password,
+                table_path, temp_dir
+            ]
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=120,
+                encoding='utf-8', errors='replace'
+            )
+
+            if result.returncode != 0:
+                # 尝试不带认证
+                cmd = ["svn", "export", "--non-interactive", table_path, temp_dir]
+                result = subprocess.run(
+                    cmd, capture_output=True, text=True, timeout=120,
+                    encoding='utf-8', errors='replace'
+                )
+                if result.returncode != 0:
+                    logger.warning("无法导出产品需求表: %s", result.stderr)
+                    return (False, f"无法读取产品需求表: {month}")
+
+            # 查找下载的xls文件
+            xls_files = [f for f in os.listdir(temp_dir) if f.endswith(('.xls', '.xlsx'))]
+            if not xls_files:
+                return (False, f"产品需求表文件不存在: {month}")
+
+            xls_path = os.path.join(temp_dir, xls_files[0])
+
+            # 读取Excel文件的J列
+            try:
+                import xlrd
+            except ImportError:
+                logger.warning("xlrd未安装，尝试安装...")
+                subprocess.run(["pip", "install", "xlrd"], check=False)
+                try:
+                    import xlrd
+                except ImportError:
+                    return (False, "无法读取Excel文件(xlrd未安装)")
+
+            workbook = xlrd.open_workbook(xls_path)
+            sheet = workbook.sheet_by_index(0)
+
+            # J列是第9列（索引从0开始）
+            j_column_values = []
+            for row_idx in range(sheet.nrows):
+                try:
+                    cell_value = sheet.cell_value(row_idx, 9)  # J列索引为9
+                    if cell_value:
+                        j_column_values.append(str(cell_value))
+                except:
+                    continue
+
+            # 从commit message中提取"功能说明/问题现象"或"功能说明"
+            report_name = ""
+            for line in commit_msg.splitlines():
+                line = line.strip()
+                m = re.match(r'^(功能说明/问题现象|功能说明|问题现象)[:：]\s*(.*)', line, re.IGNORECASE)
+                if m:
+                    report_name = m.group(2).strip()
+                    break
+
+            if not report_name:
+                return (False, "无法从提交中提取报告名称")
+
+            logger.info("待检查报告名称: %s", report_name)
+
+            # 检查J列中是否包含报告名称
+            found = False
+            for cell_value in j_column_values:
+                if report_name in cell_value or cell_value in report_name:
+                    found = True
+                    break
+
+            if found:
+                return (True, f"✓ 已归档到产品需求表({month})")
+            else:
+                return (False, f"⚠ 该笔提交尚未归档到产品需求表({month})")
+
+        finally:
+            # 清理临时目录
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    except subprocess.TimeoutExpired:
+        return (False, "产品需求表查询超时")
+    except Exception as e:
+        logger.warning("检查产品需求表失败: %s", e)
+        return (False, f"检查产品需求表失败: {str(e)}")
+
+
 class AutoReviewPoller:
     """Gerrit 自动评审轮询器。
 
     周期性查询 Gerrit 中等待评审的变更，自动执行代码评审并提交结果。
     """
 
-    def __init__(self, mock: bool = False, config_path: Optional[str] = None):
+    def __init__(self, mock: bool = False, config_path: Optional[str] = None, target_url: Optional[str] = None):
         self.config = load_config(config_path)
         self.mock = mock
+        self._target_url = target_url  # 指定评审的 Gerrit URL
         self._my_account_id: Optional[int] = None
         self._in_flight: set = set()  # 正在评审中的 change_id（防重复投递）
         self._engine = ReviewEngine()
@@ -116,7 +526,6 @@ class AutoReviewPoller:
 
             # 获取当前用户的 account_id，用于过滤自己的提交
             try:
-                from mcp_gerrit_server.gerrit_client import parse_gerrit_response
                 resp = self._client._get("/accounts/self")
                 account = parse_gerrit_response(resp.text)
                 self._my_account_id = account.get("_account_id")
@@ -141,6 +550,7 @@ class AutoReviewPoller:
 
         # 预加载评审模板（避免每次 Claude 调用时重复读文件）
         self._prompt_template = ""
+        self.REVIEW_TAG = f"autogenerated:gerrit:auto-review:{self.config.auto_review.reviewer_version}"
         prompt_path = os.path.join(
             PROJECT_DIR, "review_prompts", "c_review_prompt_fast.md",
         )
@@ -161,7 +571,20 @@ class AutoReviewPoller:
             logger.info("多维度评审: %d 维度, %d skills 已注册",
                          len(ar.dimensions), total)
 
-    REVIEW_TAG = f"autogenerated:gerrit:auto-review:{REVIEWER_VERSION}"
+        # Metis 内网审查器 (替代 Claude Code)
+        self._metis_reviewer = None
+        if ar.use_metis:
+            skills_dir = os.path.join(PROJECT_DIR, ".claude", "skills")
+            self._metis_reviewer = MetisReviewer(
+                executable=ar.metis.executable,
+                config_path=ar.metis.config,
+                tiktoken_cache_dir=ar.metis.tiktoken_cache_dir,
+                timeout=ar.metis.timeout,
+                max_concurrent=ar.metis.max_concurrent,
+                skills_dir=skills_dir,
+                work_dir=os.path.join(PROJECT_DIR, "logs"),
+            )
+            logger.info("使用 Metis 内网 LLM 审查: %s", ar.metis.executable)
 
     def _already_reviewed(self, change_id: str, rev_num: str) -> bool:
         """Check Gerrit if current user already reviewed THIS revision with current version."""
@@ -215,12 +638,17 @@ class AutoReviewPoller:
         """查询 Gerrit 并提交新变更到评审线程池，返回提交数。"""
         ar = self.config.auto_review
 
+        # 如果指定了 URL，则直接评审该变更
+        if self._target_url:
+            return self._poll_single_url()
+
         if self.mock:
             logger.info("[Mock] 查询变更...")
             changes = self._mock_changes()
         else:
-            # Append tag exclusion so Gerrit filters already-reviewed changes
-            query = f"{ar.query}+-tag:{self.REVIEW_TAG}"
+            # 直接使用配置的查询，过滤已评审变更由客户端 _already_reviewed 方法处理
+            # 注意: Gerrit 不支持 tag: 查询操作符，因此改用客户端过滤
+            query = ar.query
             logger.info("查询变更: %s", query)
             changes = self._client.list_changes(
                 query=query,
@@ -273,6 +701,65 @@ class AutoReviewPoller:
         )
         return submitted
 
+    def _poll_single_url(self) -> int:
+        """根据指定的 Gerrit URL 评审单个变更。"""
+        url = self._target_url
+        logger.info("指定评审 URL: %s", url)
+
+        # 解析 URL: http://gerrit/c/project/+/12345 或 /c/project/+/12345
+        # 格式: /c/{project}/+/{change_number}
+        import re
+        # 匹配 /c/PROJECT/+/{number}
+        match = re.search(r'/c/([^/]+)/\+/(\d+)', url)
+        if not match:
+            logger.error("无法解析 Gerrit URL (格式: /c/project/+/change_number): %s", url)
+            return 0
+
+        project = match.group(1)
+        change_number = match.group(2)
+
+        logger.info("解析到项目: %s, 变更号: %s", project, change_number)
+
+        try:
+            # 使用 list_changes 按 project + change 查询
+            query = f"project:{project} change:{change_number}"
+            logger.info("查询变更: %s", query)
+            changes = self._client.list_changes(query=query, limit=1)
+
+            if not changes:
+                logger.error("未找到变更: %s", query)
+                return 0
+
+            change_info = changes[0]
+            # 获取 change_id 格式: project~branch~Ixxxxx
+            change_id = change_info.get("id", "")
+            subject = change_info.get("subject", "")
+
+            # 获取最新 revision
+            revisions = change_info.get("revisions", {})
+            if not revisions:
+                logger.error("变更无 revisions: %s", change_id)
+                return 0
+
+            rev_info = list(revisions.values())[0]
+            rev_num = str(rev_info.get("_number", "1"))
+
+            logger.info("评审变更: %s", change_id)
+            logger.info("  项目: %s, 标题: %s", project, subject)
+
+            # 直接调用评审任务
+            self._review_task({
+                "id": change_id,
+                "_number": change_number,  # 注意是 _number 不是 number
+                "subject": subject,
+                "project": project,
+                "revisions": revisions,
+            })
+            return 1
+        except Exception as e:
+            logger.error("评审指定变更失败: %s", e, exc_info=True)
+            return 0
+
     def _review_change(
         self, change_id: str, change_number: str, rev_num: str,
         project: str, rev_id: str, subject: str = "",
@@ -293,14 +780,39 @@ class AutoReviewPoller:
             repo = self._ensure_local_repo(project)
             try:
                 change_info = self._client.get_change(change_id)
+                logger.info("  [DEBUG] get_change返回keys: %s", list(change_info.keys()))
                 base_branch = change_info.get("branch", base_branch)
+                subject = change_info.get("subject", "")
                 revisions = change_info.get("revisions", {})
+                logger.info("  [DEBUG] revisions keys: %s", list(revisions.keys()) if revisions else "empty")
                 if revisions:
                     rev_data = list(revisions.values())[0]
+                    logger.info("  [DEBUG] rev_data keys: %s", list(rev_data.keys()))
                     commit = rev_data.get("commit", {})
-                    commit_msg = commit.get("message", subject)
-            except Exception:
-                pass
+                    logger.info("  [DEBUG] commit keys: %s", list(commit.keys()) if commit else "empty")
+
+                    # 如果commit对象为空，尝试通过Gerrit API获取完整的commit message
+                    if not commit or not commit.get("message"):
+                        logger.info("  [DEBUG] commit对象为空，通过revision API获取完整commit message")
+                        try:
+                            # 使用GET /changes/{change_id}/revisions/{revision_id}/commit获取完整commit
+                            revision_id = rev_data.get("_number", "current")
+                            commit_info = self._client._get(
+                                f"/changes/{change_id}/revisions/{revision_id}/commit"
+                            )
+                            commit_data = parse_gerrit_response(commit_info.text)
+                            commit_msg = commit_data.get("message", subject) if commit_data else subject
+                            logger.info("  [DEBUG] 从revision API获取commit message: %d 字符", len(commit_msg) if commit_msg else 0)
+                        except Exception as api_err:
+                            logger.warning("获取commit message失败: %s", api_err)
+                            commit_msg = subject
+                    else:
+                        commit_msg = commit.get("message", subject)
+
+                    logger.debug("commit message length: %d", len(commit_msg) if commit_msg else 0)
+                    logger.info("  [DEBUG] 完整commit message: %s", commit_msg[:500] if commit_msg else "None")
+            except Exception as e:
+                logger.warning("获取完整commit message失败: %s", e)
             repo.ensure_branch(base_branch)
             sha = repo.fetch_change(change_number, rev_num)
             diff_text = repo.get_diff(base_branch, head_ref=sha, context_lines=3)
@@ -329,6 +841,52 @@ class AutoReviewPoller:
             except OSError:
                 diff_file = None
 
+        material_check_result = ""
+        material_issues = []
+
+        # SVN 提交材料检查（仅在启用时）
+        if getattr(self.config, "svn", None) and self.config.svn.enabled:
+            # 1.5 检查提交材料是否齐全（报告相关路径中的三个必需文档）
+            logger.info("  [1.5] 检查提交材料完整性...")
+            svn_path = _parse_svn_path(commit_msg)
+            if svn_path:
+                is_complete, msg, missing = _check_commit_material(svn_path)
+                if is_complete:
+                    logger.info("  提交材料检查通过: %s", msg)
+                    material_check_result = f"✓ 提交材料齐全"
+                else:
+                    logger.warning("  提交材料检查未通过: %s", msg)
+                    material_check_result = f"⚠ {msg}"
+                    material_issues = [{"file": "commit-material-check", "line": 0, "severity": "warning", "message": msg}]
+            else:
+                logger.warning("  未找到报告相关路径")
+                material_check_result = "⚠ 未在提交日志中找到报告相关路径"
+                material_issues = [{"file": "commit-material-check", "line": 0, "severity": "warning", "message": "未找到报告相关路径"}]
+
+            # 1.6 检查领域问题修改表归档情况
+            if self.config.svn.check_realm_archive and svn_path and "领域问题修改源" in svn_path:
+                logger.info("  [1.6] 检查领域问题修改表归档...")
+                is_archived, archive_msg = _check_realm_problem_archive(svn_path, commit_msg)
+                if is_archived:
+                    logger.info("  领域问题修改表: %s", archive_msg)
+                    material_check_result += f"\n{archive_msg}"
+                else:
+                    logger.warning("  领域问题修改表: %s", archive_msg)
+                    material_check_result += f"\n{archive_msg}"
+                    material_issues.append({"file": "realm-problem-archive-check", "line": 0, "severity": "warning", "message": archive_msg})
+
+            # 1.7 检查需求源归档情况
+            if self.config.svn.check_requirement_archive and svn_path and "需求源" in svn_path:
+                logger.info("  [1.7] 检查产品需求表归档...")
+                is_archived, archive_msg = _check_requirement_archive(svn_path, commit_msg)
+                if is_archived:
+                    logger.info("  产品需求表: %s", archive_msg)
+                    material_check_result += f"\n{archive_msg}"
+                else:
+                    logger.warning("  产品需求表: %s", archive_msg)
+                    material_check_result += f"\n{archive_msg}"
+                    material_issues.append({"file": "requirement-archive-check", "line": 0, "severity": "warning", "message": archive_msg})
+
         # 2. 运行本地规则引擎（仅在启用时）
         if self.config.auto_review.use_rules_engine:
             logger.info("  [2/4] 运行规则引擎...")
@@ -348,11 +906,38 @@ class AutoReviewPoller:
         else:
             issues = []
 
-        # 3. Claude Code AI 评审
+        # 3. Metis / Claude Code AI 评审
         changed_files = [f for _, f in files]
         ar = self.config.auto_review
 
-        if ar.use_multi_dimension and ar.dimensions:
+        if ar.use_metis and self._metis_reviewer is not None:
+            if ar.metis.review_mode == "native":
+                logger.info("  [3/4] Metis 原生安全审查 (变更文件 %d 个)...",
+                            len([f for _, f in files if f]))
+                result = self._metis_reviewer.review_native(
+                    change_id, repo_dir, files, commit_msg,
+                )
+                if not result:
+                    logger.error("  Metis 评审失败，跳过上报 (变更: %s)", change_id)
+                    return
+                dimension_results = {"Metis 安全审查": result}
+                logger.info("  Metis 评审: %d 个发现",
+                            len(result.get("issues", [])))
+            else:
+                logger.info("  [3/4] Metis 多维度并行评审 (%d 维度)...", len(ar.dimensions))
+                dimension_results = self._metis_reviewer.review_dimensions(
+                    change_id, commit_msg, repo_dir, base_branch, files, sha,
+                    ar.dimensions,
+                )
+                valid = {k: v for k, v in dimension_results.items() if v}
+                if not valid:
+                    logger.error("  所有维度 Metis 评审均失败，跳过上报 (变更: %s)", change_id)
+                    return
+                logger.info("  Metis 评审: %d/%d 维度完成", len(valid), len(ar.dimensions))
+                for dn, dr in dimension_results.items():
+                    status = "OK" if dr else "FAIL"
+                    logger.info("    [%s] %s", status, dn)
+        elif ar.use_multi_dimension and ar.dimensions:
             logger.info("  [3/4] 多维度并行评审 (%d 维度)...", len(ar.dimensions))
             dimension_results = self._invoke_claude_dimensions(
                 change_id, commit_msg, repo_dir, base_branch, files, sha,
@@ -382,6 +967,7 @@ class AutoReviewPoller:
         logger.info("  [4/4] 构造评审意见...")
         message = self._build_review_message(
             change_id, subject, issues, dimension_results,
+            material_check=material_check_result,
         )
         logger.info("  评审意见: %d 字符", len(message))
 
@@ -907,13 +1493,14 @@ class AutoReviewPoller:
 
     def _build_review_message(
         self, change_id: str, subject: str, issues,
-        claude_review = None,
+        claude_review = None, material_check: str = None,
     ) -> str:
         """构造评审消息。
 
         *claude_review* can be a str (single-dimension, backward-compat),
         a dict of ``{dim_name: result}`` (multi-dimension), or None.
         Each result can be a parsed JSON dict or a raw str (fallback).
+        *material_check* is the commit material check result string.
         """
         errors = [i for i in issues if i.severity == "error"]
         warnings = [i for i in issues if i.severity == "warning"]
@@ -926,6 +1513,13 @@ class AutoReviewPoller:
             f"标题: {subject}",
             "",
         ]
+
+        # 添加提交材料检查结果
+        if material_check:
+            lines.append("### 提交材料检查")
+            lines.append("")
+            lines.append(material_check)
+            lines.append("")
 
         if isinstance(claude_review, dict):
             for dim_name, dim_result in claude_review.items():
@@ -986,7 +1580,7 @@ class AutoReviewPoller:
                 lines.append("")
 
         lines.append("----------")
-        lines.append("(Gerrit Auto-Review v6)")
+        lines.append(f"(Gerrit Auto-Review {self.config.auto_review.reviewer_version})")
         return "\n".join(lines)
 
     # ---- Mock 支持 ----
@@ -1086,11 +1680,27 @@ def main():
     parser.add_argument("--mock", action="store_true", help="Mock 模式测试")
     parser.add_argument("--verbose", "-v", action="store_true", help="详细日志")
     parser.add_argument("--config", type=str, help="config.yaml 路径")
+    parser.add_argument("--url", type=str, help="指定评审的 Gerrit URL (如 http://gerrit/c/project/+/12345)")
+    parser.add_argument("--svn-user", type=str, help="SVN用户名")
+    parser.add_argument("--svn-password", type=str, help="SVN密码")
     args = parser.parse_args()
 
+    # 初始化日志系统
     log_file = setup_logging(args.verbose)
 
-    poller = AutoReviewPoller(mock=args.mock, config_path=args.config)
+    poller = AutoReviewPoller(mock=args.mock, config_path=args.config, target_url=args.url)
+
+    # 收集SVN凭据（CLI参数 > 环境变量 > config.yaml）
+    global _svn_username, _svn_password
+    if poller.config.svn.enabled:
+        _svn_username = args.svn_user or os.environ.get("SVN_USER") or poller.config.svn.username
+        _svn_password = args.svn_password or os.environ.get("SVN_PASSWORD") or poller.config.svn.password
+        if _svn_username:
+            logger.info("SVN集成已启用 (username=%s)", _svn_username)
+    else:
+        logger.info("SVN集成未启用 (svn.enabled=false)")
+    if args.url:
+        logger.info("指定评审 URL: %s", args.url)
 
     # 启动时清理上次未清除的孤儿 worktree（进程崩溃/被kill后残留）
     review_base = os.path.join(poller.config.repo.local_path, "_review")

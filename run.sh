@@ -13,6 +13,7 @@
 #   bash run.sh --poller --verbose # 轮询模式：详细日志
 #   bash run.sh --mock             # Mock 模式测试
 #   bash run.sh --verbose          # MCP 服务 + 详细日志
+#   bash run.sh --poller --url "http://gerrit/c/project/+/12345"  # 评审指定URL
 # ============================================================================
 
 set -e
@@ -41,12 +42,15 @@ if [ "$1" = "--poller" ] || [ "$1" = "--poller-once" ]; then
 
     while [ $# -gt 0 ]; do
         case "$1" in
-            --once)      POLLER_ARGS="$POLLER_ARGS --once" ;;
-            --mock)      POLLER_ARGS="$POLLER_ARGS --mock" ;;
-            --verbose|-v) POLLER_ARGS="$POLLER_ARGS --verbose" ;;
-            --config)    POLLER_ARGS="$POLLER_ARGS --config $2"; shift ;;
-            --interval)  POLLER_ARGS="$POLLER_ARGS --interval $2"; shift ;;
-            *)           echo "未知参数: $1"; exit 1 ;;
+            --once)          POLLER_ARGS="$POLLER_ARGS --once" ;;
+            --mock)          POLLER_ARGS="$POLLER_ARGS --mock" ;;
+            --verbose|-v)    POLLER_ARGS="$POLLER_ARGS --verbose" ;;
+            --config)        POLLER_ARGS="$POLLER_ARGS --config $2"; shift ;;
+            --interval)      POLLER_ARGS="$POLLER_ARGS --interval $2"; shift ;;
+            --url)           POLLER_ARGS="$POLLER_ARGS --url \"$2\""; shift ;;
+            --svn-user)      POLLER_ARGS="$POLLER_ARGS --svn-user \"$2\""; shift ;;
+            --svn-password)  POLLER_ARGS="$POLLER_ARGS --svn-password \"$2\""; shift ;;
+            *)               echo "未知参数: $1"; exit 1 ;;
         esac
         shift
     done

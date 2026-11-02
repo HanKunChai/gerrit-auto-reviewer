@@ -20,6 +20,19 @@ auto_review:
   use_multi_dimension: true
   dimension_timeout: 1800
   max_concurrent_claude: 4
+  reviewer_version: "v6"
+  # Metis 内网 LLM 审查器 (替代 Claude Code; 内网禁止使用 claude agent 时开启)
+  use_metis: true
+  metis:
+    # 内网 Metis 部署包路径 (metis-intranet/venv): Windows 为 Scripts\metis.exe, Linux 为 venv/bin/metis
+    executable: "<metis-intranet>/venv/Scripts/metis.exe"
+    config: "<metis-intranet>/config/metis.yaml"
+    tiktoken_cache_dir: "<metis-intranet>/tiktoken"
+    timeout: 1800
+    max_concurrent: 4
+    # native: 每变更一次原生安全审查 (Metis 自带多维安全透镜, 推荐)
+    # dimensions: 按下方 dimensions 逐维度并行审查 (仅对非 C/C++ 语言生效)
+    review_mode: "native"
   dimensions:
     - name: "问题解决评估"
       folder: "problem-solving"
@@ -31,6 +44,8 @@ auto_review:
       folder: "coding-style"
     - name: "逻辑正确性"
       folder: "logic"
+    - name: "业务逻辑"
+      folder: "domain-logic"
 
 repo:
   local_path: "./local-repo"
@@ -72,3 +87,11 @@ cache:
   dir: "./.cache/review-cache"
   max_size_mb: 500
   ttl_hours: 24
+
+svn:
+  enabled: true
+  username: ""
+  password: ""
+  check_commit_material: true
+  check_realm_archive: true
+  check_requirement_archive: true
